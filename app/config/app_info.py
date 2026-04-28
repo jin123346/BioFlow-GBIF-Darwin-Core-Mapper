@@ -1,0 +1,7 @@
+APP_NAME = "BioFlow"
+APP_VERSION = "1.0.0"
+APP_SUBTITLE = "Darwin Core Mapper"
+AUTHOR_NAME = "Jinhee Ha"
+AUTHOR_EMAIL = "hajhi789@gmail.com"
+AUTHOR_GITHUB = "https://github.com/jin123346"
+COPYRIGHT_TEXT = "© 2026 Jinhee Ha. All rights reserved."
