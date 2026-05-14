@@ -1,10 +1,13 @@
 from pathlib import Path
+import json
 
 import pandas as pd
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QColor
+from PySide6.QtCore import QUrl
+from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPixmap
 from PySide6.QtWidgets import (
+    QAbstractItemView,
     QComboBox,
     QFileDialog,
     QFrame,
@@ -18,6 +21,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSplitter,
+    QTabWidget,
     QTableWidget,
     QTableWidgetItem,
     QVBoxLayout,
@@ -34,7 +38,15 @@ from app.config.app_info import (
     COPYRIGHT_TEXT,
 )
 from app.config.country_code import ISO_COUNTRY_CODES
+from app.config.auto_mapping import (
+    CUSTOM_AUTO_MAPPING_PATH,
+    get_default_auto_mapping_rules,
+    load_auto_mapping_rules,
+    reset_auto_mapping_rules,
+    save_auto_mapping_rules,
+)
 from app.config.dwc_fields import (
+    ALL_DWC_FIELDS,
     get_default_dwc_fields,
     get_dwc_field,
     get_optional_dwc_fields,
@@ -42,7 +54,7 @@ from app.config.dwc_fields import (
 from app.services.excel_service import ExcelService
 from app.services.mapping_service import MappingService, auto_match_column
 from app.ui.paste_table_widget import PasteTableWidget
-from app.utils.paths import OUTPUT_DIR
+from app.utils.paths import LOGO_PATH, OUTPUT_DIR
 
 
 class MainWindow(QMainWindow):
@@ -50,6 +62,8 @@ class MainWindow(QMainWindow):
         super().__init__()
         self.setWindowTitle(f"{APP_NAME} v{APP_VERSION} - {APP_SUBTITLE}")
         self.resize(1280, 820)
+        if LOGO_PATH.exists():
+            self.setWindowIcon(QIcon(str(LOGO_PATH)))
 
         self.raw_df = None
         self.source_df = None
@@ -99,6 +113,11 @@ class MainWindow(QMainWindow):
         self.btn_preview_result.clicked.connect(self.preview_mapped_result)
         self.btn_preview_result.setEnabled(False)
 
+        self.btn_coordinate_preview = QPushButton("좌표 확인")
+        self.btn_coordinate_preview.setProperty("role", "secondary")
+        self.btn_coordinate_preview.clicked.connect(self.preview_coordinates_on_map)
+        self.btn_coordinate_preview.setEnabled(False)
+
         self.btn_export = QPushButton("매핑 결과 엑셀 저장")
         self.btn_export.setProperty("role", "success")
         self.btn_export.clicked.connect(self.export_mapped_excel)
@@ -121,6 +140,7 @@ class MainWindow(QMainWindow):
         button_layout.addWidget(self.btn_apply_header)
         button_layout.addWidget(self.btn_add_field)
         button_layout.addWidget(self.btn_preview_result)
+        button_layout.addWidget(self.btn_coordinate_preview)
         button_layout.addWidget(self.btn_export)
         button_layout.addWidget(self.btn_about)
         button_layout.addStretch()
@@ -135,6 +155,21 @@ class MainWindow(QMainWindow):
         title_layout = QHBoxLayout()
         title_layout.setSpacing(10)
 
+        logo_label = QLabel()
+        logo_label.setObjectName("appLogo")
+        logo_label.setFixedSize(74, 54)
+        logo_label.setAlignment(Qt.AlignCenter)
+        if LOGO_PATH.exists():
+            logo_pixmap = QPixmap(str(LOGO_PATH))
+            logo_label.setPixmap(
+                logo_pixmap.scaled(
+                    logo_label.size(),
+                    Qt.KeepAspectRatio,
+                    Qt.SmoothTransformation,
+                )
+            )
+        logo_label.setVisible(LOGO_PATH.exists())
+
         title_text_layout = QVBoxLayout()
         title_text_layout.setSpacing(2)
 
@@ -146,6 +181,7 @@ class MainWindow(QMainWindow):
 
         title_text_layout.addWidget(app_title)
         title_text_layout.addWidget(app_subtitle)
+        title_layout.addWidget(logo_label)
         title_layout.addLayout(title_text_layout)
         title_layout.addSpacing(18)
         title_layout.addLayout(button_layout)
@@ -260,9 +296,10 @@ class MainWindow(QMainWindow):
         self.missing_summary_scroll.setMaximumHeight(54)
 
         self.missing_summary_content = QWidget()
-        missing_content_layout = QVBoxLayout(self.missing_summary_content)
-        missing_content_layout.setContentsMargins(0, 0, 0, 0)
-        missing_content_layout.addWidget(self.missing_summary_label)
+        self.missing_summary_content_layout = QVBoxLayout(self.missing_summary_content)
+        self.missing_summary_content_layout.setContentsMargins(0, 0, 0, 0)
+        self.missing_summary_content_layout.setSpacing(4)
+        self.missing_summary_content_layout.addWidget(self.missing_summary_label)
         self.missing_summary_scroll.setWidget(self.missing_summary_content)
 
         missing_layout.addWidget(self.missing_summary_title)
@@ -275,7 +312,17 @@ class MainWindow(QMainWindow):
         workspace_splitter.setStretchFactor(1, 5)
         workspace_splitter.setSizes([360, 360])
 
-        right_layout.addWidget(workspace_splitter)
+        self.main_tabs = QTabWidget()
+
+        mapping_tab = QWidget()
+        mapping_tab_layout = QVBoxLayout(mapping_tab)
+        mapping_tab_layout.setContentsMargins(0, 0, 0, 0)
+        mapping_tab_layout.addWidget(workspace_splitter)
+
+        self.main_tabs.addTab(mapping_tab, "매핑 작업")
+        self.main_tabs.addTab(self._build_auto_mapping_settings_tab(), "자동 매핑 설정")
+
+        right_layout.addWidget(self.main_tabs)
 
         content_splitter.addWidget(left_panel)
         content_splitter.addWidget(right_panel)
@@ -380,6 +427,16 @@ class MainWindow(QMainWindow):
                 color: #244158;
                 border: 1px solid #c9d6e2;
             }
+            QPushButton[role="link"] {
+                background: transparent;
+                color: #0f766e;
+                border: none;
+                border-radius: 4px;
+                padding: 2px 0px;
+                font-weight: 700;
+                text-align: left;
+                min-height: 16px;
+            }
             QPushButton:disabled {
                 background: #e3e9f0;
                 color: #93a3b5;
@@ -471,6 +528,25 @@ class MainWindow(QMainWindow):
             QSplitter::handle:hover {
                 background: #b9cad8;
             }
+            QTabWidget::pane {
+                border: none;
+                background: transparent;
+            }
+            QTabBar::tab {
+                background: #e5edf4;
+                color: #52667a;
+                border: 1px solid #ccd8e3;
+                border-bottom: none;
+                border-top-left-radius: 8px;
+                border-top-right-radius: 8px;
+                padding: 8px 16px;
+                font-weight: 700;
+                min-width: 100px;
+            }
+            QTabBar::tab:selected {
+                background: #fbfdff;
+                color: #123a55;
+            }
             QScrollBar:vertical {
                 background: #f2f6fa;
                 width: 12px;
@@ -536,6 +612,135 @@ class MainWindow(QMainWindow):
         layout.addWidget(title_label)
         layout.addWidget(desc_label)
         return frame
+
+    def _build_auto_mapping_settings_tab(self) -> QWidget:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        layout.addWidget(
+            self._build_section_header(
+                "자동 매핑 설정",
+                "원본 파일의 컬럼명이 아래 후보 이름을 포함하면 해당 GBIF 필드로 자동 선택됩니다. 여러 이름은 쉼표로 구분하세요.",
+            )
+        )
+
+        self.auto_mapping_path_label = QLabel(f"설정 파일: {CUSTOM_AUTO_MAPPING_PATH}")
+        self.auto_mapping_path_label.setObjectName("metaValue")
+        self.auto_mapping_path_label.setWordWrap(True)
+        layout.addWidget(self.auto_mapping_path_label)
+
+        self.auto_mapping_table = QTableWidget()
+        self.auto_mapping_table.setColumnCount(2)
+        self.auto_mapping_table.setHorizontalHeaderLabels(
+            ["GBIF 필드", "후보 컬럼명"]
+        )
+        self.auto_mapping_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.ResizeToContents)
+        self.auto_mapping_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.auto_mapping_table.verticalHeader().setVisible(False)
+        self.auto_mapping_table.setAlternatingRowColors(True)
+        layout.addWidget(self.auto_mapping_table)
+
+        button_layout = QHBoxLayout()
+        button_layout.setSpacing(8)
+
+        self.btn_reload_auto_mapping = QPushButton("다시 불러오기")
+        self.btn_reload_auto_mapping.setProperty("role", "secondary")
+        self.btn_reload_auto_mapping.clicked.connect(self.load_auto_mapping_settings)
+
+        self.btn_reset_auto_mapping = QPushButton("기본값으로 초기화")
+        self.btn_reset_auto_mapping.setProperty("role", "secondary")
+        self.btn_reset_auto_mapping.clicked.connect(self.reset_auto_mapping_settings)
+
+        self.btn_save_auto_mapping = QPushButton("자동 매핑 설정 저장")
+        self.btn_save_auto_mapping.setProperty("role", "primary")
+        self.btn_save_auto_mapping.clicked.connect(self.save_auto_mapping_settings)
+
+        button_layout.addWidget(self.btn_reload_auto_mapping)
+        button_layout.addWidget(self.btn_reset_auto_mapping)
+        button_layout.addStretch()
+        button_layout.addWidget(self.btn_save_auto_mapping)
+        layout.addLayout(button_layout)
+
+        self.load_auto_mapping_settings()
+        return panel
+
+    def load_auto_mapping_settings(self):
+        try:
+            rules = load_auto_mapping_rules()
+        except Exception as e:
+            QMessageBox.warning(
+                self,
+                "자동 매핑 설정",
+                f"자동 매핑 설정을 불러오지 못했습니다.\n기본값으로 표시합니다.\n\n{e}",
+            )
+            rules = get_default_auto_mapping_rules()
+
+        self.auto_mapping_table.setRowCount(len(ALL_DWC_FIELDS))
+
+        for row, field in enumerate(ALL_DWC_FIELDS):
+            key_item = QTableWidgetItem(field["key"])
+            key_item.setFlags(key_item.flags() & ~Qt.ItemIsEditable)
+            self.auto_mapping_table.setItem(row, 0, key_item)
+
+            keywords = ", ".join(rules.get(field["key"], []))
+            self.auto_mapping_table.setItem(row, 1, QTableWidgetItem(keywords))
+
+        self.auto_mapping_table.resizeRowsToContents()
+
+    def _rules_from_auto_mapping_table(self) -> dict[str, list[str]]:
+        rules = {}
+        for row in range(self.auto_mapping_table.rowCount()):
+            key_item = self.auto_mapping_table.item(row, 0)
+            value_item = self.auto_mapping_table.item(row, 1)
+            if key_item is None:
+                continue
+
+            key = key_item.text().strip()
+            value = value_item.text() if value_item is not None else ""
+            rules[key] = [keyword.strip() for keyword in value.split(",") if keyword.strip()]
+
+        return rules
+
+    def save_auto_mapping_settings(self):
+        try:
+            save_auto_mapping_rules(self._rules_from_auto_mapping_table())
+
+            if self.source_df is not None:
+                self.build_mapping_ui(self.source_df.columns.tolist())
+                self.btn_coordinate_preview.setEnabled(False)
+                self.btn_export.setEnabled(False)
+
+            QMessageBox.information(
+                self,
+                "저장 완료",
+                f"자동 매핑 설정을 저장했습니다.\n\n{CUSTOM_AUTO_MAPPING_PATH}",
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "오류", f"자동 매핑 설정 저장 중 오류가 발생했습니다.\n\n{e}")
+
+    def reset_auto_mapping_settings(self):
+        reply = QMessageBox.question(
+            self,
+            "기본값으로 초기화",
+            "로컬 자동 매핑 설정을 삭제하고 기본값으로 되돌릴까요?",
+        )
+        if reply != QMessageBox.Yes:
+            return
+
+        try:
+            reset_auto_mapping_rules()
+            self.load_auto_mapping_settings()
+
+            if self.source_df is not None:
+                self.build_mapping_ui(self.source_df.columns.tolist())
+                self.btn_coordinate_preview.setEnabled(False)
+                self.btn_export.setEnabled(False)
+
+            QMessageBox.information(self, "초기화 완료", "자동 매핑 설정을 기본값으로 되돌렸습니다.")
+        except Exception as e:
+            QMessageBox.critical(self, "오류", f"자동 매핑 설정 초기화 중 오류가 발생했습니다.\n\n{e}")
 
     def _configure_table(self, table: QTableWidget):
         table.setAlternatingRowColors(True)
@@ -662,11 +867,12 @@ class MainWindow(QMainWindow):
             self.result_table.clear()
             self.result_table.setRowCount(0)
             self.result_table.setColumnCount(0)
-            self.missing_summary_label.setText("결과 확인 후 빈칸 요약이 여기에 표시됩니다.")
+            self.reset_missing_summary_panel()
 
             self.btn_apply_header.setEnabled(True)
             self.btn_add_field.setEnabled(False)
             self.btn_preview_result.setEnabled(False)
+            self.btn_coordinate_preview.setEnabled(False)
             self.btn_export.setEnabled(False)
 
         except Exception as e:
@@ -763,6 +969,7 @@ class MainWindow(QMainWindow):
             self.build_mapping_ui(self.source_df.columns.tolist())
             self.btn_add_field.setEnabled(True)
             self.btn_preview_result.setEnabled(True)
+            self.btn_coordinate_preview.setEnabled(False)
             self.btn_export.setEnabled(False)
 
             QMessageBox.information(
@@ -809,6 +1016,7 @@ class MainWindow(QMainWindow):
 
         combo_state, manual_state = self._snapshot_mapping_state()
         self.build_mapping_ui(self.source_df.columns.tolist(), combo_state, manual_state)
+        self.btn_coordinate_preview.setEnabled(False)
         self.btn_export.setEnabled(False)
 
     def build_mapping_ui(
@@ -991,6 +1199,199 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "오류", f"엑셀 저장 중 오류가 발생했습니다.\n\n{e}")
 
+    def preview_coordinates_on_map(self):
+        if self.result_df is None:
+            QMessageBox.warning(self, "경고", "먼저 '결과 확인'으로 변환 결과를 생성하세요.")
+            return
+
+        final_df = self.get_result_df_from_table()
+        if final_df is None or final_df.empty:
+            QMessageBox.warning(self, "경고", "확인할 결과 데이터가 없습니다.")
+            return
+
+        required_columns = {"decimalLatitude", "decimalLongitude"}
+        if not required_columns.issubset(final_df.columns):
+            QMessageBox.warning(
+                self,
+                "좌표 컬럼 없음",
+                "decimalLatitude와 decimalLongitude 컬럼이 결과에 있어야 좌표를 확인할 수 있습니다.",
+            )
+            return
+
+        markers = []
+        invalid_count = 0
+        label_columns = [
+            "scientificName",
+            "vernacularName",
+            "eventDate",
+            "locality",
+            "verbatimLocality",
+            "catalogNumber",
+            "occurrenceID",
+        ]
+
+        for idx, row in final_df.iterrows():
+            lat = pd.to_numeric(row.get("decimalLatitude"), errors="coerce")
+            lon = pd.to_numeric(row.get("decimalLongitude"), errors="coerce")
+            if pd.isna(lat) or pd.isna(lon) or not (-90 <= lat <= 90) or not (-180 <= lon <= 180):
+                invalid_count += 1
+                continue
+
+            details = []
+            for column in label_columns:
+                if column not in final_df.columns:
+                    continue
+                value = row.get(column)
+                if pd.isna(value) or str(value).strip() == "":
+                    continue
+                details.append({"label": column, "value": str(value).strip()})
+
+            markers.append(
+                {
+                    "rowNumber": int(idx) + 1,
+                    "lat": float(lat),
+                    "lon": float(lon),
+                    "details": details,
+                }
+            )
+
+        if not markers:
+            QMessageBox.warning(
+                self,
+                "좌표 없음",
+                "지도에 표시할 수 있는 decimalLatitude / decimalLongitude 값이 없습니다.",
+            )
+            return
+
+        map_path = OUTPUT_DIR / "coordinate_preview_map.html"
+
+        try:
+            map_path.write_text(
+                self._coordinate_preview_map_html(markers, invalid_count),
+                encoding="utf-8",
+            )
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(map_path)))
+            QMessageBox.information(
+                self,
+                "좌표 확인",
+                f"좌표 지도 미리보기를 생성했습니다.\n\n{map_path}\n\n"
+                f"표시된 좌표: {len(markers)}개\n"
+                f"제외된 좌표: {invalid_count}개",
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "오류", f"좌표 확인 중 오류가 발생했습니다.\n\n{e}")
+
+    @staticmethod
+    def _coordinate_preview_map_html(markers: list[dict], invalid_count: int) -> str:
+        marker_json = json.dumps(markers, ensure_ascii=False)
+        return f"""<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Coordinate Preview Map</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <style>
+    html, body, #map {{
+      height: 100%;
+      margin: 0;
+    }}
+    body {{
+      font-family: "Segoe UI", "Malgun Gothic", sans-serif;
+    }}
+    .summary {{
+      background: #ffffff;
+      border: 1px solid #d8e2ec;
+      border-radius: 8px;
+      box-shadow: 0 8px 24px rgba(15, 23, 42, 0.14);
+      color: #1e293b;
+      font-size: 13px;
+      line-height: 1.45;
+      padding: 10px 12px;
+    }}
+    .summary strong {{
+      display: block;
+      font-size: 14px;
+      margin-bottom: 4px;
+    }}
+    .popup-title {{
+      color: #0f766e;
+      font-weight: 800;
+      margin-bottom: 6px;
+    }}
+    .popup-row {{
+      margin: 2px 0;
+    }}
+    .popup-row b {{
+      color: #334155;
+    }}
+  </style>
+</head>
+<body>
+  <div id="map"></div>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    const markers = {marker_json};
+    const invalidCount = {invalid_count};
+    const map = L.map("map");
+
+    L.tileLayer("https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png", {{
+      maxZoom: 19,
+      attribution: "&copy; OpenStreetMap contributors"
+    }}).addTo(map);
+
+    const bounds = [];
+    const markerLayer = L.layerGroup().addTo(map);
+    const escapeHtml = (value) => String(value)
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#039;");
+
+    markers.forEach((item) => {{
+      const position = [item.lat, item.lon];
+      bounds.push(position);
+      const detailRows = item.details.map((detail) =>
+        `<div class="popup-row"><b>${{escapeHtml(detail.label)}}:</b> ${{escapeHtml(detail.value)}}</div>`
+      ).join("");
+      const popup = `
+        <div class="popup-title">Row ${{item.rowNumber}}</div>
+        <div class="popup-row"><b>Latitude:</b> ${{item.lat}}</div>
+        <div class="popup-row"><b>Longitude:</b> ${{item.lon}}</div>
+        ${{detailRows}}
+      `;
+      L.circleMarker(position, {{
+        radius: 7,
+        color: "#0f766e",
+        fillColor: "#14b8a6",
+        fillOpacity: 0.72,
+        weight: 2
+      }}).bindPopup(popup).addTo(markerLayer);
+    }});
+
+    if (bounds.length === 1) {{
+      map.setView(bounds[0], 12);
+    }} else {{
+      map.fitBounds(bounds, {{ padding: [36, 36], maxZoom: 14 }});
+    }}
+
+    const summary = L.control({{ position: "topright" }});
+    summary.onAdd = function() {{
+      const div = L.DomUtil.create("div", "summary");
+      div.innerHTML = `
+        <strong>Coordinate Preview</strong>
+        Displayed: ${{markers.length}}<br>
+        Invalid / blank: ${{invalidCount}}
+      `;
+      return div;
+    }};
+    summary.addTo(map);
+  </script>
+</body>
+</html>
+"""
+
     def get_manual_values(self) -> dict:
         values = {}
 
@@ -1007,13 +1408,13 @@ class MainWindow(QMainWindow):
 
         return values
 
-    def _get_missing_value_summary(self, df) -> tuple[int, list[str]]:
+    def _get_missing_value_summary(self, df) -> tuple[int, list[str], list[tuple[int, int, str]]]:
         blank_mask = df.fillna("").astype(str).apply(lambda col: col.str.strip() == "")
         missing_counts = blank_mask.sum()
         missing_counts = missing_counts[missing_counts > 0].sort_values(ascending=False)
 
         if missing_counts.empty:
-            return 0, []
+            return 0, [], []
 
         total_missing = int(missing_counts.sum())
         summary_lines = ["컬럼별 빈칸 수"]
@@ -1025,35 +1426,90 @@ class MainWindow(QMainWindow):
         if len(missing_counts) > 8:
             summary_lines.append(f"외 {len(missing_counts) - 8}개 컬럼")
 
-        summary_lines.append("")
-        summary_lines.append("빈칸 위치 예시")
-
+        missing_locations = []
         preview_count = 0
         for row_idx in range(len(df)):
             for col_idx, column in enumerate(df.columns):
                 value = df.iat[row_idx, col_idx]
                 if pd.isna(value) or str(value).strip() == "":
-                    summary_lines.append(
-                        f"{column}: {row_idx + 1}행 {col_idx + 1}열"
-                    )
+                    missing_locations.append((row_idx, col_idx, str(column)))
                     preview_count += 1
                     if preview_count >= 12:
                         remaining = total_missing - preview_count
                         if remaining > 0:
                             summary_lines.append(f"외 {remaining}개 위치")
-                        return total_missing, summary_lines
+                        return total_missing, summary_lines, missing_locations
 
-        return total_missing, summary_lines
+        return total_missing, summary_lines, missing_locations
 
-    def _update_missing_summary_panel(self, total_missing: int, missing_summary: list[str]):
+    def _clear_missing_summary_content(self):
+        while self.missing_summary_content_layout.count():
+            item = self.missing_summary_content_layout.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                widget.deleteLater()
+
+    def reset_missing_summary_panel(self):
+        self._clear_missing_summary_content()
+        self.missing_summary_label = QLabel("결과 확인 후 빈칸 요약이 여기에 표시됩니다.")
+        self.missing_summary_label.setWordWrap(True)
+        self.missing_summary_label.setProperty("class", "sectionDescription")
+        self.missing_summary_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self.missing_summary_content_layout.addWidget(self.missing_summary_label)
+
+    def _update_missing_summary_panel(
+        self,
+        total_missing: int,
+        missing_summary: list[str],
+        missing_locations: list[tuple[int, int, str]] | None = None,
+    ):
+        self._clear_missing_summary_content()
+
+        self.missing_summary_label = QLabel()
+        self.missing_summary_label.setWordWrap(True)
+        self.missing_summary_label.setProperty("class", "sectionDescription")
+        self.missing_summary_label.setAlignment(Qt.AlignTop | Qt.AlignLeft)
+        self.missing_summary_content_layout.addWidget(self.missing_summary_label)
+
         if total_missing > 0:
             self.missing_summary_label.setText(
                 "총 빈칸 수: "
                 f"{total_missing}개\n"
                 + "\n".join(missing_summary)
             )
+
+            if missing_locations:
+                heading = QLabel("빈칸 위치 예시")
+                heading.setProperty("class", "sectionDescription")
+                self.missing_summary_content_layout.addWidget(heading)
+
+                for row_idx, col_idx, column in missing_locations:
+                    button = QPushButton(f"{column}: {row_idx + 1}행 {col_idx + 1}열")
+                    button.setProperty("role", "link")
+                    button.setCursor(Qt.PointingHandCursor)
+                    button.clicked.connect(
+                        lambda checked=False, r=row_idx, c=col_idx: self.focus_result_cell(r, c)
+                    )
+                    self.missing_summary_content_layout.addWidget(button)
         else:
             self.missing_summary_label.setText("빈칸 없이 모두 채워져 있습니다.")
+
+        self.missing_summary_content_layout.addStretch()
+
+    def focus_result_cell(self, row_idx: int, col_idx: int):
+        if row_idx >= self.result_table.rowCount() or col_idx >= self.result_table.columnCount():
+            return
+
+        if hasattr(self, "main_tabs"):
+            self.main_tabs.setCurrentIndex(0)
+
+        self.result_table.setFocus()
+        self.result_table.clearSelection()
+        self.result_table.setCurrentCell(row_idx, col_idx)
+        self.result_table.scrollToItem(
+            self.result_table.item(row_idx, col_idx),
+            QAbstractItemView.PositionAtCenter,
+        )
 
     @staticmethod
     def validate_country_code(code: str) -> bool:
@@ -1100,8 +1556,9 @@ class MainWindow(QMainWindow):
 
             self.show_result_preview(self.result_df)
             self.btn_export.setEnabled(True)
-            total_missing, missing_summary = self._get_missing_value_summary(self.result_df)
-            self._update_missing_summary_panel(total_missing, missing_summary)
+            self.btn_coordinate_preview.setEnabled(True)
+            total_missing, missing_summary, missing_locations = self._get_missing_value_summary(self.result_df)
+            self._update_missing_summary_panel(total_missing, missing_summary, missing_locations)
 
             if total_missing > 0:
                 QMessageBox.warning(

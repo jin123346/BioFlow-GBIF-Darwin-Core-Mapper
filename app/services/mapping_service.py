@@ -2,7 +2,7 @@ import difflib
 
 import pandas as pd
 
-from app.config.auto_mapping import AUTO_MAPPING_RULES
+from app.config.auto_mapping import load_auto_mapping_rules
 
 DATE_FIELDS = {"eventDate", "dateIdentified"}
 TEXT_NUMBER_FIELDS = {
@@ -17,7 +17,8 @@ def normalize(text: str) -> str:
 
 
 def auto_match_column(dwc_key: str, source_columns: list[str]) -> str | None:
-    candidates = AUTO_MAPPING_RULES.get(dwc_key, [])
+    rules = load_auto_mapping_rules()
+    candidates = rules.get(dwc_key, [])
 
     for col in source_columns:
         col_norm = normalize(col)
@@ -26,11 +27,12 @@ def auto_match_column(dwc_key: str, source_columns: list[str]) -> str | None:
             if normalize(keyword) in col_norm:
                 return col
 
-    return fuzzy_match(dwc_key, source_columns)
+    return fuzzy_match(dwc_key, source_columns, rules)
 
 
-def fuzzy_match(dwc_key: str, source_columns: list[str]) -> str | None:
-    candidates = AUTO_MAPPING_RULES.get(dwc_key, [])
+def fuzzy_match(dwc_key: str, source_columns: list[str], rules: dict | None = None) -> str | None:
+    rules = rules or load_auto_mapping_rules()
+    candidates = rules.get(dwc_key, [])
     normalized_map = {normalize(col): col for col in source_columns}
 
     for candidate in candidates:

@@ -12,9 +12,14 @@ if (-not (Test-Path $python)) {
 
 $appName = "BioFlowGBIF"
 $appInfoPath = Join-Path $PSScriptRoot "app\config\app_info.py"
+$logoPath = Join-Path $PSScriptRoot "bioflow_logo.png"
 
 if (-not (Test-Path $appInfoPath)) {
     throw "App info file not found: $appInfoPath"
+}
+
+if (-not (Test-Path $logoPath)) {
+    throw "Logo file not found: $logoPath"
 }
 
 $appInfoText = Get-Content -LiteralPath $appInfoPath -Raw
@@ -40,6 +45,7 @@ $folderName = "${appName}_v${safeVersion}"
     --noconfirm `
     --clean `
     --windowed `
+    --add-data "bioflow_logo.png;." `
     --name $appName `
     main.py
 

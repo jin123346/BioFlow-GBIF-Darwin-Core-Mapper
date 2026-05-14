@@ -1,0 +1,164 @@
+{
+  "occurrenceID": [
+    "데이터베이스번호\n(기관코드-분류코드-******)"
+  ],
+  "basisOfRecord": [
+    "기록유형",
+    "basisofrecord"
+  ],
+  "catalogNumber": [
+    "데이터베이스번호\n(기관코드-분류코드-******)"
+  ],
+  "recordedBy": [
+    "관찰자 영문"
+  ],
+  "individualCount": [
+    "관찰개체수\n(숫자만입력)"
+  ],
+  "sex": [
+    "성별\n(드롭다운선택)"
+  ],
+  "lifeStage": [
+    "생활단계",
+    "life stage",
+    "lifestage"
+  ],
+  "occurrenceStatus": [
+    "존재여부",
+    "occurrencestatus"
+  ],
+  "occurrenceRemarks": [
+    "비고",
+    "관찰비고",
+    "occurrenceremarks",
+    "remarks"
+  ],
+  "eventDate": [
+    "관찰월일\n(2016-01-01)"
+  ],
+  "year": [
+    "연도",
+    "year"
+  ],
+  "month": [
+    "월",
+    "month"
+  ],
+  "day": [
+    "일",
+    "day"
+  ],
+  "habitat": [
+    "서식지",
+    "habitat"
+  ],
+  "samplingProtocol": [
+    "조사방법",
+    "samplingprotocol",
+    "protocol"
+  ],
+  "countryCode": [
+    "국가코드",
+    "countrycode",
+    "country"
+  ],
+  "stateProvince": [
+    "관찰위치 시도 영문"
+  ],
+  "county": [
+    "관찰 위치 시군구 영문"
+  ],
+  "locality": [
+    "관찰위치 읍면동 영문"
+  ],
+  "verbatimLocality": [
+    "관찰위치 상세 영문"
+  ],
+  "decimalLatitude": [
+    "위도",
+    "위도 영문",
+    "decimallatitude",
+    "latitude",
+    "lat"
+  ],
+  "decimalLongitude": [
+    "경도",
+    "경도 영문",
+    "decimallongitude",
+    "longitude",
+    "lon",
+    "lng"
+  ],
+  "coordinateUncertaintyInMeters": [
+    "좌표오차",
+    "coordinateuncertaintyinmeters",
+    "coordinateuncertainty"
+  ],
+  "identifiedBy": [
+    "동정자 영문",
+    "identifiedby",
+    "determinavit",
+    "identifier"
+  ],
+  "dateIdentified": [
+    "동정년월일\n(2016-01-01)"
+  ],
+  "identificationRemarks": [
+    "동정비고",
+    "identificationremarks"
+  ],
+  "scientificName": [
+    "학명",
+    "학명 영문",
+    "scientificname",
+    "scientific",
+    "sci_name",
+    "species"
+  ],
+  "vernacularName": [
+    "국명\n(잘라내서 붙이기 안됨\n복사해서 붙이기는 허용)"
+  ],
+  "kingdom": [
+    "계",
+    "kingdom"
+  ],
+  "phylum": [
+    "문",
+    "phylum"
+  ],
+  "class": [
+    "강",
+    "class"
+  ],
+  "order": [
+    "목",
+    "order"
+  ],
+  "family": [
+    "과",
+    "family"
+  ],
+  "genus": [
+    "속",
+    "genus"
+  ],
+  "taxonRank": [
+    "분류계급",
+    "taxonrank",
+    "rank"
+  ],
+  "scientificNameAuthorship": [
+    "명명자",
+    "scientificnameauthorship",
+    "authorship"
+  ],
+  "institutionCode": [
+    "기관코드",
+    "institutioncode"
+  ],
+  "collectionCode": [
+    "분류코드",
+    "컬렉션코드",
+    "collectioncode"
+  ]
+}
