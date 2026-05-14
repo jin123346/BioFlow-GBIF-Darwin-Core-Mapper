@@ -24,6 +24,45 @@ Version 1.0.3
 - BioFlow 로고 표시
 - 매핑 결과 엑셀 저장
 
+## 릴리즈 노트
+
+### BioFlowGBIF v1.0.3
+
+BioFlowGBIF의 첫 번째 공개 릴리즈입니다. 엑셀/CSV 데이터를 GBIF 업로드용 Darwin Core 형식으로 매핑하고, 결과를 엑셀 파일로 저장할 수 있는 Windows 데스크톱 프로그램입니다.
+
+#### 주요 포함 기능
+
+- 엑셀/CSV 파일 업로드
+- 엑셀 시트 선택
+- 원본 데이터에서 헤더 행 직접 지정
+- GBIF Darwin Core 기본 컬럼 자동 매핑
+- 필요한 GBIF 컬럼 추가 매핑
+- 자동 매핑 후보 컬럼명 직접 수정 및 저장
+- 변환 결과 미리보기 및 직접 수정
+- 빈칸 컬럼/위치 점검
+- `decimalLatitude`, `decimalLongitude` 좌표 지도 미리보기
+- 매핑 결과 엑셀 저장
+- BioFlow 로고 및 창 아이콘 적용
+
+#### 다운로드 및 릴리즈 노트
+
+최신 다운로드 파일과 릴리즈 노트는 아래 링크에서 확인할 수 있습니다.
+
+- [최신 릴리즈 보기](https://github.com/jin123346/BioFlow-GBIF-Darwin-Core-Mapper/releases/latest)
+
+`BioFlowGBIF_v1.0.3.zip` 파일을 다운로드한 뒤 압축을 풀고 실행하세요.
+
+```text
+BioFlowGBIF.exe
+```
+
+#### 사용 전 참고 사항
+
+- Windows 환경용 실행 파일입니다.
+- 지도 미리보기는 OpenStreetMap 지도 타일을 사용하므로 인터넷 연결이 필요합니다.
+- R 설치 없이 기본 기능과 좌표 지도 미리보기를 사용할 수 있습니다.
+- R 기반 추가 분석 스크립트를 사용하는 경우에는 R 및 `Rscript` PATH 설정이 필요할 수 있습니다.
+
 ## 기본 제공 컬럼
 
 아래 컬럼은 기본 매핑 화면에 항상 표시됩니다.
