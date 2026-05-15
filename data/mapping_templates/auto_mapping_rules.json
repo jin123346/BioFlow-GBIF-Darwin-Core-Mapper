@@ -1,22 +1,28 @@
 {
   "occurrenceID": [
-    "데이터베이스번호\n(기관코드-분류코드-******)"
+    "데이터베이스번호"
   ],
   "basisOfRecord": [
     "기록유형",
     "basisofrecord"
   ],
   "catalogNumber": [
-    "데이터베이스번호\n(기관코드-분류코드-******)"
+    "표본번호",
+    "기록번호",
+    "catalognumber"
   ],
   "recordedBy": [
     "관찰자 영문"
   ],
   "individualCount": [
-    "관찰개체수\n(숫자만입력)"
+    "개체수",
+    "개체수량",
+    "individualcount",
+    "count"
   ],
   "sex": [
-    "성별\n(드롭다운선택)"
+    "성별",
+    "sex"
   ],
   "lifeStage": [
     "생활단계",
@@ -34,7 +40,7 @@
     "remarks"
   ],
   "eventDate": [
-    "관찰월일\n(2016-01-01)"
+    "관찰년월일"
   ],
   "year": [
     "연도",
@@ -66,10 +72,10 @@
     "관찰위치 시도 영문"
   ],
   "county": [
-    "관찰 위치 시군구 영문"
+    "관찰위치 시군구 영문"
   ],
   "locality": [
-    "관찰위치 읍면동 영문"
+    "관찰위치읍면동영문명"
   ],
   "verbatimLocality": [
     "관찰위치 상세 영문"
@@ -95,28 +101,20 @@
     "coordinateuncertainty"
   ],
   "identifiedBy": [
-    "동정자 영문",
-    "identifiedby",
-    "determinavit",
-    "identifier"
+    "동정자 영문"
   ],
   "dateIdentified": [
-    "동정년월일\n(2016-01-01)"
+    "동정년월일"
   ],
   "identificationRemarks": [
     "동정비고",
     "identificationremarks"
   ],
   "scientificName": [
-    "학명",
-    "학명 영문",
-    "scientificname",
-    "scientific",
-    "sci_name",
-    "species"
+    "학명"
   ],
   "vernacularName": [
-    "국명\n(잘라내서 붙이기 안됨\n복사해서 붙이기는 허용)"
+    "국명"
   ],
   "kingdom": [
     "계",

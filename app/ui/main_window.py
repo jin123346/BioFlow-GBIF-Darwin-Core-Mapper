@@ -3,7 +3,7 @@ import json
 
 import pandas as pd
 
-from PySide6.QtCore import Qt
+from PySide6.QtCore import QSettings, Qt
 from PySide6.QtCore import QUrl
 from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPixmap
 from PySide6.QtWidgets import (
@@ -71,6 +71,7 @@ class MainWindow(QMainWindow):
         self.current_file_path = None
         self.current_sheet_name = None
         self.selected_header_row = None
+        self.settings = QSettings(AUTHOR_NAME, APP_NAME)
         self.active_field_keys = [field["key"] for field in get_default_dwc_fields()]
         self.combo_boxes = {}
         self.manual_inputs = {}
@@ -108,6 +109,11 @@ class MainWindow(QMainWindow):
         self.btn_add_field.clicked.connect(self.add_optional_field)
         self.btn_add_field.setEnabled(False)
 
+        self.btn_source_coordinate_preview = QPushButton("원본 좌표 확인")
+        self.btn_source_coordinate_preview.setProperty("role", "secondary")
+        self.btn_source_coordinate_preview.clicked.connect(self.preview_source_coordinates_on_map)
+        self.btn_source_coordinate_preview.setEnabled(False)
+
         self.btn_preview_result = QPushButton("결과 확인")
         self.btn_preview_result.setProperty("role", "primary")
         self.btn_preview_result.clicked.connect(self.preview_mapped_result)
@@ -139,6 +145,7 @@ class MainWindow(QMainWindow):
         button_layout.addWidget(self.btn_upload)
         button_layout.addWidget(self.btn_apply_header)
         button_layout.addWidget(self.btn_add_field)
+        button_layout.addWidget(self.btn_source_coordinate_preview)
         button_layout.addWidget(self.btn_preview_result)
         button_layout.addWidget(self.btn_coordinate_preview)
         button_layout.addWidget(self.btn_export)
@@ -823,15 +830,27 @@ class MainWindow(QMainWindow):
         self.active_field_keys = [field["key"] for field in get_default_dwc_fields()]
         self._update_mapping_summary()
 
+    def _get_last_open_dir(self) -> str:
+        last_dir = self.settings.value("file_dialog/last_open_dir", "", str)
+        if last_dir and Path(last_dir).is_dir():
+            return last_dir
+        return ""
+
+    def _remember_open_dir(self, file_path: str) -> None:
+        parent_dir = Path(file_path).expanduser().parent
+        if parent_dir.is_dir():
+            self.settings.setValue("file_dialog/last_open_dir", str(parent_dir))
+
     def load_excel(self):
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "파일 선택",
-            "",
+            self._get_last_open_dir(),
             "Excel/CSV Files (*.xlsx *.xls *.csv)",
         )
         if not file_path:
             return
+        self._remember_open_dir(file_path)
 
         try:
             sheet_names = ExcelService.get_sheet_names(file_path)
@@ -871,6 +890,7 @@ class MainWindow(QMainWindow):
 
             self.btn_apply_header.setEnabled(True)
             self.btn_add_field.setEnabled(False)
+            self.btn_source_coordinate_preview.setEnabled(False)
             self.btn_preview_result.setEnabled(False)
             self.btn_coordinate_preview.setEnabled(False)
             self.btn_export.setEnabled(False)
@@ -968,6 +988,7 @@ class MainWindow(QMainWindow):
             )
             self.build_mapping_ui(self.source_df.columns.tolist())
             self.btn_add_field.setEnabled(True)
+            self.btn_source_coordinate_preview.setEnabled(True)
             self.btn_preview_result.setEnabled(True)
             self.btn_coordinate_preview.setEnabled(False)
             self.btn_export.setEnabled(False)
@@ -1199,6 +1220,69 @@ class MainWindow(QMainWindow):
         except Exception as e:
             QMessageBox.critical(self, "오류", f"엑셀 저장 중 오류가 발생했습니다.\n\n{e}")
 
+    def _select_coordinate_column(self, title: str, prompt: str, preferred_key: str) -> str | None:
+        if self.source_df is None:
+            return None
+
+        columns = [str(column) for column in self.source_df.columns.tolist()]
+        if not columns:
+            return None
+
+        current_index = 0
+        matched_column = auto_match_column(preferred_key, columns)
+        if matched_column in columns:
+            current_index = columns.index(matched_column)
+
+        selected_column, ok = QInputDialog.getItem(
+            self,
+            title,
+            prompt,
+            columns,
+            current_index,
+            False,
+        )
+        if not ok or not selected_column:
+            return None
+        return selected_column
+
+    def preview_source_coordinates_on_map(self):
+        if self.source_df is None:
+            QMessageBox.warning(self, "경고", "먼저 헤더를 적용해 주세요.")
+            return
+
+        lat_column = self._select_coordinate_column(
+            "원본 좌표 확인",
+            "위도 컬럼을 선택하세요:",
+            "decimalLatitude",
+        )
+        if not lat_column:
+            return
+
+        lon_column = self._select_coordinate_column(
+            "원본 좌표 확인",
+            "경도 컬럼을 선택하세요:",
+            "decimalLongitude",
+        )
+        if not lon_column:
+            return
+
+        if lat_column == lon_column:
+            QMessageBox.warning(self, "경고", "위도와 경도는 서로 다른 컬럼을 선택해 주세요.")
+            return
+
+        label_columns = [
+            str(column)
+            for column in self.source_df.columns.tolist()
+            if str(column) not in {lat_column, lon_column}
+        ][:8]
+        self._preview_coordinate_dataframe(
+            self.source_df,
+            lat_column,
+            lon_column,
+            label_columns,
+            "원본 좌표 확인",
+        )
+
     def preview_coordinates_on_map(self):
         if self.result_df is None:
             QMessageBox.warning(self, "경고", "먼저 '결과 확인'으로 변환 결과를 생성하세요.")
@@ -1218,8 +1302,6 @@ class MainWindow(QMainWindow):
             )
             return
 
-        markers = []
-        invalid_count = 0
         label_columns = [
             "scientificName",
             "vernacularName",
@@ -1229,17 +1311,35 @@ class MainWindow(QMainWindow):
             "catalogNumber",
             "occurrenceID",
         ]
+        self._preview_coordinate_dataframe(
+            final_df,
+            "decimalLatitude",
+            "decimalLongitude",
+            label_columns,
+            "좌표 확인",
+        )
 
-        for idx, row in final_df.iterrows():
-            lat = pd.to_numeric(row.get("decimalLatitude"), errors="coerce")
-            lon = pd.to_numeric(row.get("decimalLongitude"), errors="coerce")
+    def _preview_coordinate_dataframe(
+        self,
+        df: pd.DataFrame,
+        lat_column: str,
+        lon_column: str,
+        label_columns: list[str],
+        dialog_title: str,
+    ):
+        markers = []
+        invalid_count = 0
+
+        for idx, row in df.iterrows():
+            lat = pd.to_numeric(row.get(lat_column), errors="coerce")
+            lon = pd.to_numeric(row.get(lon_column), errors="coerce")
             if pd.isna(lat) or pd.isna(lon) or not (-90 <= lat <= 90) or not (-180 <= lon <= 180):
                 invalid_count += 1
                 continue
 
             details = []
             for column in label_columns:
-                if column not in final_df.columns:
+                if column not in df.columns:
                     continue
                 value = row.get(column)
                 if pd.isna(value) or str(value).strip() == "":
@@ -1259,7 +1359,7 @@ class MainWindow(QMainWindow):
             QMessageBox.warning(
                 self,
                 "좌표 없음",
-                "지도에 표시할 수 있는 decimalLatitude / decimalLongitude 값이 없습니다.",
+                f"지도에 표시할 수 있는 {lat_column} / {lon_column} 값이 없습니다.",
             )
             return
 
@@ -1273,13 +1373,13 @@ class MainWindow(QMainWindow):
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(map_path)))
             QMessageBox.information(
                 self,
-                "좌표 확인",
+                dialog_title,
                 f"좌표 지도 미리보기를 생성했습니다.\n\n{map_path}\n\n"
                 f"표시된 좌표: {len(markers)}개\n"
                 f"제외된 좌표: {invalid_count}개",
             )
         except Exception as e:
-            QMessageBox.critical(self, "오류", f"좌표 확인 중 오류가 발생했습니다.\n\n{e}")
+            QMessageBox.critical(self, "오류", f"{dialog_title} 중 오류가 발생했습니다.\n\n{e}")
 
     @staticmethod
     def _coordinate_preview_map_html(markers: list[dict], invalid_count: int) -> str:
