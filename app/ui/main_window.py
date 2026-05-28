@@ -881,40 +881,29 @@ class MainWindow(QMainWindow):
 
             raw_df = ExcelService.read_excel_raw(file_path, sheet_name=selected_sheet)
             # 파일 초기화
-            self._set_load_file_state(file_path,selected_sheet,raw_df)
+            self._set_loaded_file_state(file_path,selected_sheet,raw_df)
 
-            # self.current_file_path = file_path
-            # self.current_sheet_name = selected_sheet
-            # self.source_df = None
-            # self.result_df = None
-            # self.selected_header_row = None
-            # self._reset_active_fields()
-
-            self.lbl_file.setText(f"파일: {Path(file_path).name}")
-            self.lbl_sheet.setText(selected_sheet)
-            self.lbl_header.setText("선택된 헤더 행: 없음")
-            self.preview_position_label.setText("현재 선택 위치: 없음")
-
+            # UI 초기화(라벨 갱신)
+            self._update_loaded_file_labels(self,file_path, sheet_name=selected_sheet)
+        
+                
             self.show_preview_raw(self.raw_df)
             self.clear_mapping_ui()
             self.result_table.clear()
             self.result_table.setRowCount(0)
             self.result_table.setColumnCount(0)
             self.reset_missing_summary_panel()
+            
+            # 버튼 상태 초기화
+            self._set_file_loaded_buttons_enabled(self)
 
-            self.btn_apply_header.setEnabled(True)
-            self.btn_add_field.setEnabled(False)
-            self.btn_source_coordinate_preview.setEnabled(False)
-            self.btn_preview_result.setEnabled(False)
-            self.btn_coordinate_preview.setEnabled(False)
-            self.btn_export.setEnabled(False)
 
         except Exception as e:
             QMessageBox.critical(self, "오류", f"엑셀 파일을 불러오지 못했습니다.\n\n{e}")
             
     
     # 파일을 새로 불러올 때마다 관련 상태를 초기화하는 메서드
-    def _set_load_file_state(self, file_path, sheet_name, raw_df):
+    def _set_loaded_file_state(self, file_path, sheet_name, raw_df):
         self.raw_df = raw_df
         self.current_file_path = file_path
         self.current_sheet_name = sheet_name
@@ -922,6 +911,22 @@ class MainWindow(QMainWindow):
         self.result_df = None
         self.selected_header_row = None
         self._reset_active_fields()
+    
+    
+    def _update_loaded_file_labels(self, file_path, sheet_name):
+        self.lbl_file.setText(f"파일: {Path(file_path).name}")
+        self.lbl_sheet.setText(sheet_name)
+        self.lbl_header.setText("선택된 헤더 행: 없음")
+        self.preview_position_label.setText("현재 선택 위치: 없음")
+        
+    
+    def _set_file_loaded_buttons_enabled(self):
+        self.btn_apply_header.setEnabled(True)
+        self.btn_add_field.setEnabled(False)
+        self.btn_source_coordinate_preview.setEnabled(False)
+        self.btn_preview_result.setEnabled(False)
+        self.btn_coordinate_preview.setEnabled(False)
+        self.btn_export.setEnabled(False)
     
     def show_preview_raw(self, df):
         preview_df = df
