@@ -49,8 +49,8 @@ class ExcelService:
         if ExcelService.is_csv_path(file_path):
             return ["CSV"]
 
-        excel_file = pd.ExcelFile(file_path)
-        return excel_file.sheet_names
+        with pd.ExcelFile(file_path) as excel_file:
+            return excel_file.sheet_names
 
     @staticmethod
     def read_excel_raw(file_path: str, sheet_name=0) -> pd.DataFrame:
@@ -67,6 +67,18 @@ class ExcelService:
             return ExcelService._read_csv(file_path, header=header_row)
 
         return pd.read_excel(file_path, header=header_row, sheet_name=sheet_name)
+
+    @staticmethod
+    def clean_column_names(columns) -> list[str]:
+        cleaned_columns = []
+
+        for index, column in enumerate(columns, start=1):
+            column_name = str(column).strip()
+            if not column_name or column_name.lower().startswith("unnamed:"):
+                column_name = f"Column_{index}"
+            cleaned_columns.append(column_name)
+
+        return cleaned_columns
 
     @staticmethod
     def get_columns(df: pd.DataFrame) -> list[str]:
