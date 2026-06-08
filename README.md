@@ -2,7 +2,7 @@
 
 Made by Jinhee Ha
 
-Version 1.0.4
+Version 2.0.0
 
 © 2026 Jinhee Ha. All rights reserved.
 
@@ -22,10 +22,32 @@ Version 1.0.4
 - 빈칸 컬럼/위치 점검
 - 매핑 전 원본 위도/경도 좌표 확인
 - 위도/경도 좌표 지도 미리보기
+- GBIF 종 occurrence 데이터 조회 및 분석
+- 연도별/월별/계절별 그래프 리포트
+- GBIF occurrence download DOI 요청
+- GBIF 분석 데이터 CSV/엑셀/GeoJSON 저장
 - BioFlow 로고 표시
 - 매핑 결과 엑셀 저장
 
 ## 릴리즈 노트
+
+### BioFlowGBIF v2.0.0
+
+GBIF 종 데이터 분석 기능을 추가한 메이저 릴리즈입니다. 기존 Darwin Core 매핑 기능에 더해 GBIF occurrence 데이터를 직접 조회하고, 지도와 그래프로 분포 및 기록 변화를 확인할 수 있습니다.
+
+#### 변경 사항
+
+- `GBIF 분석` 탭 추가
+- 종명 기반 GBIF occurrence 조회
+- 연도 범위와 월 범위 필터 추가
+- 연도별, 월별, 계절별, 종합 그래프 리포트 추가
+- 막대 그래프와 선 그래프 선택 지원
+- GBIF occurrence download DOI 요청 기능 추가
+- 다운로드 URL 표시, 열기, 복사 기능 추가
+- GBIF 분석 데이터 CSV 저장 추가
+- GBIF 분석 데이터와 Excel 차트가 포함된 엑셀 저장 추가
+- QGIS에서 열 수 있는 GeoJSON 저장 추가
+- 빠른 분석 조회 한도를 최대 100,000건으로 확대
 
 ### BioFlowGBIF v1.0.4
 
@@ -63,7 +85,7 @@ BioFlowGBIF의 첫 번째 공개 릴리즈입니다. 엑셀/CSV 데이터를 GBI
 
 - [최신 릴리즈 보기](https://github.com/jin123346/BioFlow-GBIF-Darwin-Core-Mapper/releases/latest)
 
-`BioFlowGBIF_v1.0.4.zip` 파일을 다운로드한 뒤 압축을 풀고 실행하세요.
+`BioFlowGBIF_v2.0.0.zip` 파일을 다운로드한 뒤 압축을 풀고 실행하세요.
 
 ```text
 BioFlowGBIF.exe
@@ -105,21 +127,21 @@ python -m venv .venv
 .\build_exe.ps1
 ```
 
-빌드 결과는 `dist\BioFlowGBIF_v1.0.4\BioFlowGBIF.exe`처럼 생성됩니다. 같은 버전 폴더가 이미 있으면 덮어쓰지 않고 중단됩니다. 필요하면 `.\build_exe.ps1 -Version 1.0.4`처럼 직접 지정한 버전으로 빌드할 수도 있습니다.
+빌드 결과는 `dist\BioFlowGBIF_v2.0.0\BioFlowGBIF.exe`처럼 생성됩니다. 같은 버전 폴더가 이미 있으면 덮어쓰지 않고 중단됩니다. 필요하면 `.\build_exe.ps1 -Version 2.0.0`처럼 직접 지정한 버전으로 빌드할 수도 있습니다.
 
 `bioflow_logo.png`는 앱 상단 로고와 창 아이콘으로 사용되며, `build_exe.ps1` 실행 시 배포 폴더에 함께 포함됩니다.
 
 빌드가 완료되면 실행 파일은 아래 경로에 생성됩니다.
 
 ```text
-dist\BioFlowGBIF_v1.0.4\BioFlowGBIF.exe
+dist\BioFlowGBIF_v2.0.0\BioFlowGBIF.exe
 ```
 
-배포할 때는 `dist\BioFlowGBIF_v1.0.4` 폴더 전체를 압축해서 전달하는 것을 권장합니다. 실행 파일과 필요한 라이브러리, 로고 이미지가 함께 들어 있기 때문입니다.
+배포할 때는 `dist\BioFlowGBIF_v2.0.0` 폴더 전체를 압축해서 전달하는 것을 권장합니다. 실행 파일과 필요한 라이브러리, 로고 이미지가 함께 들어 있기 때문입니다.
 
 ## 배포 전 확인 사항
 
-- `dist\BioFlowGBIF_v1.0.4\BioFlowGBIF.exe`를 실행해 프로그램이 열리는지 확인합니다.
+- `dist\BioFlowGBIF_v2.0.0\BioFlowGBIF.exe`를 실행해 프로그램이 열리는지 확인합니다.
 - 상단에 BioFlow 로고가 표시되는지 확인합니다.
 - 샘플 엑셀 파일로 업로드, 시트 선택, 헤더 적용, 결과 확인, 엑셀 저장까지 확인합니다.
 - 좌표가 있는 샘플 파일로 `원본 좌표 확인`과 `좌표 확인`을 눌러 지도 미리보기가 열리는지 확인합니다.
