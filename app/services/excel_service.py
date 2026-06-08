@@ -24,6 +24,8 @@ class ExcelService:
         if suffix not in ExcelService.EXCEL_EXTENSIONS | ExcelService.CSV_EXTENSIONS:
             raise ValueError("지원하지 않는 파일 형식입니다. .xlsx, .xls, .csv 파일만 가능합니다.")
 
+
+
     @staticmethod
     def is_csv_path(file_path: str) -> bool:
         return Path(file_path).suffix.lower() in ExcelService.CSV_EXTENSIONS
