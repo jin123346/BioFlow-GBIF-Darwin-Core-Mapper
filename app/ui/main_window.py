@@ -8,6 +8,7 @@ from PySide6.QtCore import QUrl
 from PySide6.QtGui import QColor, QDesktopServices, QIcon, QPixmap
 from PySide6.QtWidgets import (
     QAbstractItemView,
+    QApplication,
     QComboBox,
     QFileDialog,
     QFrame,
@@ -21,6 +22,7 @@ from PySide6.QtWidgets import (
     QPushButton,
     QScrollArea,
     QSplitter,
+    QSpinBox,
     QTabWidget,
     QTableWidget,
     QTableWidgetItem,
@@ -51,7 +53,9 @@ from app.config.dwc_fields import (
     get_dwc_field,
     get_optional_dwc_fields,
 )
+
 from app.services.excel_service import ExcelService
+from app.services.gbif_service import GbifService
 from app.services.mapping_service import MappingService, auto_match_column
 from app.ui.paste_table_widget import PasteTableWidget
 from app.utils.paths import LOGO_PATH, OUTPUT_DIR
@@ -68,6 +72,8 @@ class MainWindow(QMainWindow):
         self.raw_df = None
         self.source_df = None
         self.result_df = None
+        self.gbif_df = None
+        self.gbif_search_summary = None
         self.current_file_path = None
         self.current_sheet_name = None
         self.selected_header_row = None
@@ -327,6 +333,7 @@ class MainWindow(QMainWindow):
         mapping_tab_layout.addWidget(workspace_splitter)
 
         self.main_tabs.addTab(mapping_tab, "매핑 작업")
+        self.main_tabs.addTab(self._build_gbif_analysis_tab(), "GBIF 분석")
         self.main_tabs.addTab(self._build_auto_mapping_settings_tab(), "자동 매핑 설정")
 
         right_layout.addWidget(self.main_tabs)
@@ -620,6 +627,1221 @@ class MainWindow(QMainWindow):
         layout.addWidget(desc_label)
         return frame
 
+    def _build_gbif_analysis_tab(self) -> QWidget:
+        panel = QWidget()
+        layout = QVBoxLayout(panel)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(10)
+
+        layout.addWidget(
+            self._build_section_header(
+                "GBIF 종 데이터 분석",
+                "GBIF에서 찾는 종의 좌표 자료를 가져와 지도와 연도별 기록 변화를 확인합니다.",
+            )
+        )
+
+        search_card = QFrame()
+        search_card.setProperty("class", "sectionCard")
+        search_layout = QVBoxLayout(search_card)
+        search_layout.setContentsMargins(16, 14, 16, 14)
+        search_layout.setSpacing(10)
+
+        input_layout = QHBoxLayout()
+        input_layout.setSpacing(8)
+
+        self.gbif_species_input = QLineEdit()
+        self.gbif_species_input.setPlaceholderText("학명 또는 종명 예: Quercus mongolica")
+
+        self.gbif_country_input = QLineEdit()
+        self.gbif_country_input.setPlaceholderText("국가코드 선택 입력")
+        self.gbif_country_input.setMaxLength(2)
+        self.gbif_country_input.setFixedWidth(120)
+
+        self.gbif_limit_input = QSpinBox()
+        self.gbif_limit_input.setRange(10, 100000)
+        self.gbif_limit_input.setSingleStep(1000)
+        self.gbif_limit_input.setValue(1000)
+        self.gbif_limit_input.setSuffix("건")
+        self.gbif_limit_input.setFixedWidth(116)
+
+        self.gbif_chart_type_combo = QComboBox()
+        self.gbif_chart_type_combo.addItem("막대 그래프", "bar")
+        self.gbif_chart_type_combo.addItem("선 그래프", "line")
+        self.gbif_chart_type_combo.setFixedWidth(120)
+
+        self.gbif_period_combo = QComboBox()
+        self.gbif_period_combo.addItem("종합", "summary")
+        self.gbif_period_combo.addItem("연도별", "year")
+        self.gbif_period_combo.addItem("월별", "month")
+        self.gbif_period_combo.addItem("계절별", "season")
+        self.gbif_period_combo.setFixedWidth(96)
+        self.gbif_period_combo.currentIndexChanged.connect(self.update_gbif_period_controls)
+
+        self.gbif_year_from_input = QSpinBox()
+        self.gbif_year_from_input.setRange(0, 9999)
+        self.gbif_year_from_input.setSpecialValueText("전체")
+        self.gbif_year_from_input.setFixedWidth(86)
+
+        self.gbif_year_to_input = QSpinBox()
+        self.gbif_year_to_input.setRange(0, 9999)
+        self.gbif_year_to_input.setSpecialValueText("전체")
+        self.gbif_year_to_input.setFixedWidth(86)
+
+        self.gbif_month_from_input = QSpinBox()
+        self.gbif_month_from_input.setRange(1, 12)
+        self.gbif_month_from_input.setValue(1)
+        self.gbif_month_from_input.setSuffix("월")
+        self.gbif_month_from_input.setFixedWidth(70)
+
+        self.gbif_month_to_input = QSpinBox()
+        self.gbif_month_to_input.setRange(1, 12)
+        self.gbif_month_to_input.setValue(12)
+        self.gbif_month_to_input.setSuffix("월")
+        self.gbif_month_to_input.setFixedWidth(70)
+
+        self.btn_fetch_gbif = QPushButton("GBIF 가져오기")
+        self.btn_fetch_gbif.setProperty("role", "primary")
+        self.btn_fetch_gbif.clicked.connect(self.fetch_gbif_analysis)
+
+        self.btn_open_gbif_report = QPushButton("지도/그래프 열기")
+        self.btn_open_gbif_report.setProperty("role", "secondary")
+        self.btn_open_gbif_report.clicked.connect(self.open_gbif_analysis_report)
+        self.btn_open_gbif_report.setEnabled(False)
+
+        self.btn_export_gbif_csv = QPushButton("CSV 저장")
+        self.btn_export_gbif_csv.setProperty("role", "secondary")
+        self.btn_export_gbif_csv.clicked.connect(self.export_gbif_analysis_csv)
+        self.btn_export_gbif_csv.setEnabled(False)
+
+        self.btn_export_gbif_excel = QPushButton("엑셀 저장")
+        self.btn_export_gbif_excel.setProperty("role", "secondary")
+        self.btn_export_gbif_excel.clicked.connect(self.export_gbif_analysis_excel)
+        self.btn_export_gbif_excel.setEnabled(False)
+
+        self.btn_export_gbif_geojson = QPushButton("QGIS 저장")
+        self.btn_export_gbif_geojson.setProperty("role", "secondary")
+        self.btn_export_gbif_geojson.clicked.connect(self.export_gbif_analysis_geojson)
+        self.btn_export_gbif_geojson.setEnabled(False)
+
+        input_layout.addWidget(self.gbif_species_input, 1)
+        input_layout.addWidget(self.gbif_country_input)
+        input_layout.addWidget(self.gbif_limit_input)
+        input_layout.addWidget(self.gbif_period_combo)
+        input_layout.addWidget(self.gbif_chart_type_combo)
+        input_layout.addWidget(self.btn_fetch_gbif)
+        input_layout.addWidget(self.btn_open_gbif_report)
+        input_layout.addWidget(self.btn_export_gbif_csv)
+        input_layout.addWidget(self.btn_export_gbif_excel)
+        input_layout.addWidget(self.btn_export_gbif_geojson)
+        search_layout.addLayout(input_layout)
+
+        filter_layout = QHBoxLayout()
+        filter_layout.setSpacing(8)
+        filter_layout.addWidget(QLabel("연도 범위"))
+        filter_layout.addWidget(self.gbif_year_from_input)
+        filter_layout.addWidget(QLabel("~"))
+        filter_layout.addWidget(self.gbif_year_to_input)
+        filter_layout.addSpacing(14)
+        filter_layout.addWidget(QLabel("월 범위"))
+        filter_layout.addWidget(self.gbif_month_from_input)
+        filter_layout.addWidget(QLabel("~"))
+        filter_layout.addWidget(self.gbif_month_to_input)
+        filter_layout.addStretch()
+        search_layout.addLayout(filter_layout)
+
+        download_layout = QHBoxLayout()
+        download_layout.setSpacing(8)
+
+        self.gbif_username_input = QLineEdit()
+        self.gbif_username_input.setPlaceholderText("GBIF username")
+        self.gbif_username_input.setText(self.settings.value("gbif/username", "", str))
+
+        self.gbif_email_input = QLineEdit()
+        self.gbif_email_input.setPlaceholderText("GBIF email")
+        self.gbif_email_input.setText(self.settings.value("gbif/email", "", str))
+
+        self.gbif_password_input = QLineEdit()
+        self.gbif_password_input.setPlaceholderText("GBIF password")
+        self.gbif_password_input.setEchoMode(QLineEdit.Password)
+
+        self.btn_request_gbif_download = QPushButton("DOI 다운로드 요청")
+        self.btn_request_gbif_download.setProperty("role", "success")
+        self.btn_request_gbif_download.clicked.connect(self.request_gbif_download)
+
+        download_layout.addWidget(self.gbif_username_input)
+        download_layout.addWidget(self.gbif_email_input)
+        download_layout.addWidget(self.gbif_password_input)
+        download_layout.addWidget(self.btn_request_gbif_download)
+        search_layout.addLayout(download_layout)
+
+        download_result_layout = QHBoxLayout()
+        download_result_layout.setSpacing(8)
+
+        self.gbif_download_url_input = QLineEdit()
+        self.gbif_download_url_input.setPlaceholderText("마지막 GBIF 다운로드 URL")
+        self.gbif_download_url_input.setReadOnly(True)
+
+        self.btn_open_gbif_download_url = QPushButton("URL 열기")
+        self.btn_open_gbif_download_url.setProperty("role", "secondary")
+        self.btn_open_gbif_download_url.clicked.connect(self.open_gbif_download_url)
+        self.btn_open_gbif_download_url.setEnabled(False)
+
+        self.btn_copy_gbif_download_url = QPushButton("URL 복사")
+        self.btn_copy_gbif_download_url.setProperty("role", "secondary")
+        self.btn_copy_gbif_download_url.clicked.connect(self.copy_gbif_download_url)
+        self.btn_copy_gbif_download_url.setEnabled(False)
+
+        download_result_layout.addWidget(QLabel("다운로드 URL"))
+        download_result_layout.addWidget(self.gbif_download_url_input, 1)
+        download_result_layout.addWidget(self.btn_open_gbif_download_url)
+        download_result_layout.addWidget(self.btn_copy_gbif_download_url)
+        search_layout.addLayout(download_result_layout)
+
+        self.gbif_summary_label = QLabel("검색 결과가 아직 없습니다.")
+        self.gbif_summary_label.setObjectName("metaValue")
+        self.gbif_summary_label.setWordWrap(True)
+        search_layout.addWidget(self.gbif_summary_label)
+        layout.addWidget(search_card)
+
+        self.gbif_result_table = QTableWidget()
+        self._configure_table(self.gbif_result_table)
+        self.gbif_result_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
+        self.gbif_result_table.verticalHeader().setVisible(True)
+        self.gbif_result_table.verticalHeader().setDefaultSectionSize(28)
+        layout.addWidget(self.gbif_result_table)
+
+        return panel
+
+    def fetch_gbif_analysis(self):
+        species_name = self.gbif_species_input.text().strip()
+        country_code = self.gbif_country_input.text().strip().upper()
+        if not species_name:
+            QMessageBox.warning(self, "GBIF 분석", "검색할 학명 또는 종명을 입력하세요.")
+            return
+        if country_code and not self.validate_country_code(country_code):
+            QMessageBox.warning(self, "GBIF 분석", "국가코드는 KR, JP, US처럼 2자리 영문으로 입력하세요.")
+            return
+
+        self.btn_fetch_gbif.setEnabled(False)
+        self.btn_fetch_gbif.setText("가져오는 중...")
+        try:
+            result = GbifService.fetch_occurrences(
+                species_name,
+                country_code=country_code,
+                limit=self.gbif_limit_input.value(),
+            )
+            self.gbif_df = result.dataframe
+            self.gbif_search_summary = {
+                "matchedName": result.matched_name,
+                "taxonKey": result.taxon_key,
+                "rank": result.rank,
+                "status": result.status,
+                "totalRecords": result.total_records,
+                "shownRecords": len(result.dataframe),
+                "countryCode": country_code or "ALL",
+            }
+            self.show_gbif_results(self.gbif_df)
+            self.update_gbif_year_range(self.gbif_df)
+            self.btn_open_gbif_report.setEnabled(not self.gbif_df.empty)
+            self.btn_export_gbif_csv.setEnabled(not self.gbif_df.empty)
+            self.btn_export_gbif_excel.setEnabled(not self.gbif_df.empty)
+            self.btn_export_gbif_geojson.setEnabled(not self.gbif_df.empty)
+            limit_note = ""
+            if result.total_records > len(result.dataframe):
+                limit_note = "\n빠른 분석은 현재 설정한 건수까지만 표시합니다. 논문용 전체 자료는 DOI 다운로드 요청을 사용하세요."
+            self.gbif_summary_label.setText(
+                f"일치 이름: {result.matched_name} / taxonKey: {result.taxon_key} / "
+                f"전체 좌표 기록: {result.total_records:,}건 / 표시: {len(result.dataframe):,}건"
+                f"{limit_note}"
+            )
+            if self.gbif_df.empty:
+                QMessageBox.information(self, "GBIF 분석", "일치하는 좌표 기록이 없습니다.")
+            else:
+                self.open_gbif_analysis_report()
+        except Exception as e:
+            self.gbif_df = None
+            self.gbif_search_summary = None
+            self.update_gbif_year_range(pd.DataFrame())
+            self.btn_open_gbif_report.setEnabled(False)
+            self.btn_export_gbif_csv.setEnabled(False)
+            self.btn_export_gbif_excel.setEnabled(False)
+            self.btn_export_gbif_geojson.setEnabled(False)
+            QMessageBox.critical(self, "GBIF 분석 오류", f"GBIF 데이터를 가져오는 중 오류가 발생했습니다.\n\n{e}")
+        finally:
+            self.btn_fetch_gbif.setEnabled(True)
+            self.btn_fetch_gbif.setText("GBIF 가져오기")
+
+    def request_gbif_download(self):
+        species_name = self.gbif_species_input.text().strip()
+        country_code = self.gbif_country_input.text().strip().upper()
+        username = self.gbif_username_input.text().strip()
+        email = self.gbif_email_input.text().strip()
+        password = self.gbif_password_input.text()
+
+        if not species_name:
+            QMessageBox.warning(self, "GBIF 다운로드 요청", "검색할 학명 또는 종명을 입력하세요.")
+            return
+        if country_code and not self.validate_country_code(country_code):
+            QMessageBox.warning(self, "GBIF 다운로드 요청", "국가코드는 KR, JP, US처럼 2자리 영문으로 입력하세요.")
+            return
+
+        self.btn_request_gbif_download.setEnabled(False)
+        self.btn_request_gbif_download.setText("요청 중...")
+        try:
+            year_from, year_to, month_from, month_to = self.get_gbif_filter_ranges()
+            result = GbifService.request_occurrence_download(
+                scientific_name=species_name,
+                country_code=country_code,
+                username=username,
+                password=password,
+                email=email,
+                year_from=year_from,
+                year_to=year_to,
+                month_from=month_from,
+                month_to=month_to,
+            )
+            self.settings.setValue("gbif/username", username)
+            self.settings.setValue("gbif/email", email)
+            self.set_gbif_download_url(result.download_url)
+            QDesktopServices.openUrl(QUrl(result.download_url))
+            QMessageBox.information(
+                self,
+                "GBIF 다운로드 요청 완료",
+                "GBIF occurrence download 요청을 보냈습니다.\n\n"
+                f"Download key: {result.key}\n"
+                f"상태 API: {result.status_url}\n"
+                f"다운로드/DOI 페이지: {result.download_url}\n\n"
+                "GBIF가 파일 준비를 마치면 계정 이메일로 알림을 보냅니다. "
+                "논문에는 다운로드 페이지의 공식 DOI citation 문구를 사용하세요.",
+            )
+        except Exception as e:
+            QMessageBox.critical(
+                self,
+                "GBIF 다운로드 요청 오류",
+                f"GBIF 다운로드 요청 중 오류가 발생했습니다.\n\n{e}",
+            )
+        finally:
+            self.btn_request_gbif_download.setEnabled(True)
+            self.btn_request_gbif_download.setText("DOI 다운로드 요청")
+
+    def set_gbif_download_url(self, url: str):
+        self.gbif_download_url_input.setText(url)
+        has_url = bool(url.strip())
+        self.btn_open_gbif_download_url.setEnabled(has_url)
+        self.btn_copy_gbif_download_url.setEnabled(has_url)
+
+    def open_gbif_download_url(self):
+        url = self.gbif_download_url_input.text().strip()
+        if not url:
+            QMessageBox.warning(self, "GBIF 다운로드 URL", "열 수 있는 다운로드 URL이 없습니다.")
+            return
+        QDesktopServices.openUrl(QUrl(url))
+
+    def copy_gbif_download_url(self):
+        url = self.gbif_download_url_input.text().strip()
+        if not url:
+            QMessageBox.warning(self, "GBIF 다운로드 URL", "복사할 다운로드 URL이 없습니다.")
+            return
+        QApplication.clipboard().setText(url)
+        QMessageBox.information(self, "URL 복사", "GBIF 다운로드 URL을 클립보드에 복사했습니다.")
+
+    def show_gbif_results(self, df: pd.DataFrame):
+        self.gbif_result_table.clear()
+        self.gbif_result_table.setRowCount(len(df))
+        self.gbif_result_table.setColumnCount(len(df.columns))
+        self.gbif_result_table.setHorizontalHeaderLabels([str(col) for col in df.columns.tolist()])
+
+        for row_idx in range(len(df)):
+            for col_idx, _ in enumerate(df.columns):
+                value = df.iloc[row_idx, col_idx]
+                self.gbif_result_table.setItem(
+                    row_idx,
+                    col_idx,
+                    QTableWidgetItem("" if pd.isna(value) else str(value)),
+                )
+
+        self.gbif_result_table.resizeColumnsToContents()
+        self.gbif_result_table.horizontalHeader().setSectionResizeMode(QHeaderView.ResizeToContents)
+
+    def update_gbif_year_range(self, df: pd.DataFrame):
+        years = self._gbif_year_values(df)
+        if years.empty:
+            for widget in (self.gbif_year_from_input, self.gbif_year_to_input):
+                widget.setRange(0, 9999)
+                widget.setValue(0)
+            return
+
+        min_year = int(years.min())
+        max_year = int(years.max())
+        for widget in (self.gbif_year_from_input, self.gbif_year_to_input):
+            widget.setRange(0, 9999)
+        self.gbif_year_from_input.setValue(min_year)
+        self.gbif_year_to_input.setValue(max_year)
+
+        self.update_gbif_period_controls()
+
+    def update_gbif_period_controls(self, *_):
+        for widget in (self.gbif_year_from_input, self.gbif_year_to_input):
+            widget.setEnabled(True)
+
+    def get_gbif_filter_ranges(self) -> tuple[int | None, int | None, int, int]:
+        year_from = self.gbif_year_from_input.value() if self.gbif_year_from_input.isEnabled() else 0
+        year_to = self.gbif_year_to_input.value() if self.gbif_year_to_input.isEnabled() else 0
+        month_from = self.gbif_month_from_input.value()
+        month_to = self.gbif_month_to_input.value()
+
+        if year_from and year_to and year_from > year_to:
+            raise ValueError("연도 범위는 시작 연도가 끝 연도보다 클 수 없습니다.")
+        if month_from > month_to:
+            raise ValueError("월 범위는 시작 월이 끝 월보다 클 수 없습니다.")
+
+        return year_from or None, year_to or None, month_from, month_to
+
+    def open_gbif_analysis_report(self):
+        if self.gbif_df is None or self.gbif_df.empty:
+            QMessageBox.warning(self, "GBIF 분석", "먼저 GBIF 데이터를 가져오세요.")
+            return
+
+        report_path = OUTPUT_DIR / "gbif_analysis_report.html"
+        try:
+            chart_type = self.gbif_chart_type_combo.currentData() or "bar"
+            period_type = self.gbif_period_combo.currentData() or "year"
+            year_from, year_to, month_from, month_to = self.get_gbif_filter_ranges()
+            report_path.write_text(
+                self._gbif_analysis_report_html(
+                    self.gbif_df,
+                    self.gbif_search_summary or {},
+                    chart_type,
+                    period_type,
+                    year_from,
+                    year_to,
+                    month_from,
+                    month_to,
+                ),
+                encoding="utf-8",
+            )
+            QDesktopServices.openUrl(QUrl.fromLocalFile(str(report_path)))
+        except Exception as e:
+            QMessageBox.critical(self, "GBIF 분석 오류", f"리포트를 생성하는 중 오류가 발생했습니다.\n\n{e}")
+
+    def export_gbif_analysis_csv(self):
+        if self.gbif_df is None or self.gbif_df.empty:
+            QMessageBox.warning(self, "GBIF 분석", "저장할 GBIF 데이터가 없습니다.")
+            return
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "GBIF 분석 데이터 저장",
+            str(Path(self._get_last_save_dir()) / "gbif_occurrences.csv"),
+            "CSV Files (*.csv)",
+        )
+        if not file_path:
+            return
+
+        try:
+            self.gbif_df.to_csv(file_path, index=False, encoding="utf-8-sig")
+            self._remember_save_dir(file_path)
+            QMessageBox.information(self, "저장 완료", f"GBIF 분석 데이터를 저장했습니다.\n\n{file_path}")
+        except Exception as e:
+            QMessageBox.critical(self, "오류", f"GBIF 분석 데이터 저장 중 오류가 발생했습니다.\n\n{e}")
+
+    def export_gbif_analysis_excel(self):
+        if self.gbif_df is None or self.gbif_df.empty:
+            QMessageBox.warning(self, "GBIF 분석", "저장할 GBIF 데이터가 없습니다.")
+            return
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "GBIF 분석 엑셀 저장",
+            str(Path(self._get_last_save_dir()) / "gbif_analysis.xlsx"),
+            "Excel Files (*.xlsx)",
+        )
+        if not file_path:
+            return
+        if not file_path.lower().endswith(".xlsx"):
+            file_path += ".xlsx"
+
+        try:
+            chart_type = self.gbif_chart_type_combo.currentData() or "bar"
+            period_type = self.gbif_period_combo.currentData() or "summary"
+            year_from, year_to, month_from, month_to = self.get_gbif_filter_ranges()
+            filtered_df = self._filter_gbif_dataframe(
+                self.gbif_df,
+                year_from,
+                year_to,
+                month_from,
+                month_to,
+            )
+            chart_list = self._gbif_temporal_charts(
+                filtered_df,
+                period_type,
+                year_from,
+                year_to,
+                month_from,
+                month_to,
+            )
+            self._write_gbif_analysis_workbook(
+                file_path,
+                filtered_df,
+                chart_list,
+                chart_type,
+                {
+                    **(self.gbif_search_summary or {}),
+                    "yearFrom": year_from or "ALL",
+                    "yearTo": year_to or "ALL",
+                    "monthFrom": month_from,
+                    "monthTo": month_to,
+                    "downloadUrl": self.gbif_download_url_input.text().strip(),
+                },
+            )
+            self._remember_save_dir(file_path)
+            QMessageBox.information(
+                self,
+                "저장 완료",
+                f"GBIF 분석 데이터와 그래프를 엑셀로 저장했습니다.\n\n{file_path}",
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "오류", f"GBIF 분석 엑셀 저장 중 오류가 발생했습니다.\n\n{e}")
+
+    def export_gbif_analysis_geojson(self):
+        if self.gbif_df is None or self.gbif_df.empty:
+            QMessageBox.warning(self, "GBIF 분석", "저장할 GBIF 데이터가 없습니다.")
+            return
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "QGIS용 GeoJSON 저장",
+            str(Path(self._get_last_save_dir()) / "gbif_occurrences.geojson"),
+            "GeoJSON Files (*.geojson);;JSON Files (*.json)",
+        )
+        if not file_path:
+            return
+        if not file_path.lower().endswith((".geojson", ".json")):
+            file_path += ".geojson"
+
+        try:
+            year_from, year_to, month_from, month_to = self.get_gbif_filter_ranges()
+            filtered_df = self._filter_gbif_dataframe(
+                self.gbif_df,
+                year_from,
+                year_to,
+                month_from,
+                month_to,
+            )
+            geojson = self._gbif_dataframe_to_geojson(filtered_df)
+            feature_count = len(geojson["features"])
+            if feature_count == 0:
+                QMessageBox.warning(
+                    self,
+                    "QGIS 저장",
+                    "저장할 수 있는 유효한 좌표가 없습니다.",
+                )
+                return
+
+            Path(file_path).write_text(
+                json.dumps(geojson, ensure_ascii=False, indent=2),
+                encoding="utf-8",
+            )
+            self._remember_save_dir(file_path)
+            QMessageBox.information(
+                self,
+                "저장 완료",
+                f"QGIS에서 열 수 있는 GeoJSON 파일을 저장했습니다.\n\n{file_path}\n\n"
+                f"저장된 좌표: {feature_count:,}개",
+            )
+        except Exception as e:
+            QMessageBox.critical(self, "오류", f"QGIS용 GeoJSON 저장 중 오류가 발생했습니다.\n\n{e}")
+
+    @staticmethod
+    def _gbif_dataframe_to_geojson(df: pd.DataFrame) -> dict:
+        features = []
+        for _, row in df.iterrows():
+            lat = pd.to_numeric(row.get("decimalLatitude"), errors="coerce")
+            lon = pd.to_numeric(row.get("decimalLongitude"), errors="coerce")
+            if pd.isna(lat) or pd.isna(lon):
+                continue
+            if not (-90 <= float(lat) <= 90 and -180 <= float(lon) <= 180):
+                continue
+
+            properties = {}
+            for column, value in row.items():
+                if column in {"decimalLatitude", "decimalLongitude"}:
+                    continue
+                if pd.isna(value):
+                    properties[str(column)] = None
+                else:
+                    properties[str(column)] = value.item() if hasattr(value, "item") else value
+
+            features.append(
+                {
+                    "type": "Feature",
+                    "geometry": {
+                        "type": "Point",
+                        "coordinates": [float(lon), float(lat)],
+                    },
+                    "properties": properties,
+                }
+            )
+
+        return {
+            "type": "FeatureCollection",
+            "name": "gbif_occurrences",
+            "features": features,
+        }
+
+    @staticmethod
+    def _write_gbif_analysis_workbook(
+        file_path: str,
+        df: pd.DataFrame,
+        chart_list: list[dict],
+        chart_type: str,
+        summary: dict,
+    ):
+        from openpyxl import Workbook
+        from openpyxl.chart import BarChart, LineChart, Reference
+        from openpyxl.utils import get_column_letter
+        from openpyxl.utils.dataframe import dataframe_to_rows
+
+        workbook = Workbook()
+        summary_ws = workbook.active
+        summary_ws.title = "Summary"
+
+        summary_ws.append(["항목", "값"])
+        for key, value in summary.items():
+            summary_ws.append([key, value])
+        summary_ws.append(["filteredRecords", len(df)])
+
+        data_ws = workbook.create_sheet("Occurrences")
+        for row in dataframe_to_rows(df, index=False, header=True):
+            data_ws.append(row)
+
+        chart_data_ws = workbook.create_sheet("ChartData")
+        charts_ws = workbook.create_sheet("Charts")
+        chart_data_row = 1
+        chart_anchor_row = 1
+
+        for chart_index, chart_data in enumerate(chart_list, start=1):
+            labels = chart_data.get("labels", [])
+            series = chart_data.get("series", [])
+            title = f"{chart_data.get('title', 'Chart')} 기록 수"
+
+            start_row = chart_data_row
+            chart_data_ws.cell(row=start_row, column=1, value=title)
+            header_row = start_row + 1
+            chart_data_ws.cell(row=header_row, column=1, value="구분")
+            for series_index, item in enumerate(series, start=2):
+                chart_data_ws.cell(row=header_row, column=series_index, value=item.get("name", f"Series {series_index - 1}"))
+
+            for label_index, label in enumerate(labels, start=header_row + 1):
+                chart_data_ws.cell(row=label_index, column=1, value=label)
+                for series_index, item in enumerate(series, start=2):
+                    values = item.get("values", [])
+                    value = values[label_index - header_row - 1] if label_index - header_row - 1 < len(values) else 0
+                    chart_data_ws.cell(row=label_index, column=series_index, value=value)
+
+            end_row = header_row + len(labels)
+            end_col = 1 + len(series)
+            if labels and series:
+                chart = LineChart() if chart_type == "line" else BarChart()
+                chart.title = title
+                chart.y_axis.title = "기록 수"
+                chart.x_axis.title = "구분"
+                chart.height = 8
+                chart.width = 16
+                data_ref = Reference(
+                    chart_data_ws,
+                    min_col=2,
+                    max_col=end_col,
+                    min_row=header_row,
+                    max_row=end_row,
+                )
+                category_ref = Reference(
+                    chart_data_ws,
+                    min_col=1,
+                    min_row=header_row + 1,
+                    max_row=end_row,
+                )
+                chart.add_data(data_ref, titles_from_data=True)
+                chart.set_categories(category_ref)
+                charts_ws.add_chart(chart, f"A{chart_anchor_row}")
+                chart_anchor_row += 18
+
+            chart_data_row = end_row + 3
+
+        for worksheet in workbook.worksheets:
+            for column_cells in worksheet.columns:
+                max_length = 0
+                column_letter = get_column_letter(column_cells[0].column)
+                for cell in column_cells[:200]:
+                    if cell.value is not None:
+                        max_length = max(max_length, len(str(cell.value)))
+                worksheet.column_dimensions[column_letter].width = min(max(max_length + 2, 10), 42)
+
+        workbook.save(file_path)
+
+    @staticmethod
+    def _gbif_analysis_report_html(
+        df: pd.DataFrame,
+        summary: dict,
+        chart_type: str = "bar",
+        period_type: str = "year",
+        year_from: int | None = None,
+        year_to: int | None = None,
+        month_from: int = 1,
+        month_to: int = 12,
+    ) -> str:
+        df = MainWindow._filter_gbif_dataframe(
+            df,
+            year_from,
+            year_to,
+            month_from,
+            month_to,
+        )
+        points = []
+        for _, row in df.iterrows():
+            lat = pd.to_numeric(row.get("decimalLatitude"), errors="coerce")
+            lon = pd.to_numeric(row.get("decimalLongitude"), errors="coerce")
+            if pd.isna(lat) or pd.isna(lon):
+                continue
+            points.append(
+                {
+                    "lat": float(lat),
+                    "lon": float(lon),
+                    "scientificName": str(row.get("scientificName", "") or ""),
+                    "year": str(row.get("year", "") or ""),
+                    "eventDate": str(row.get("eventDate", "") or ""),
+                    "countryCode": str(row.get("countryCode", "") or ""),
+                    "locality": str(row.get("locality", "") or ""),
+                    "gbifID": str(row.get("gbifID", "") or ""),
+                }
+            )
+
+        temporal_charts = MainWindow._gbif_temporal_charts(
+            df,
+            period_type,
+            year_from,
+            year_to,
+            month_from,
+            month_to,
+        )
+
+        points_json = json.dumps(points, ensure_ascii=False)
+        temporal_json = json.dumps(temporal_charts, ensure_ascii=False)
+        summary_json = json.dumps(summary, ensure_ascii=False)
+        chart_type_json = json.dumps(chart_type if chart_type in {"bar", "line"} else "bar")
+        return f"""<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>GBIF Analysis Report</title>
+  <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css">
+  <style>
+    html, body {{
+      margin: 0;
+      min-height: 100%;
+      background: #eef3f7;
+      color: #1e293b;
+      font-family: "Segoe UI", "Malgun Gothic", sans-serif;
+    }}
+    header {{
+      background: #fbfdff;
+      border-bottom: 1px solid #d8e2ec;
+      padding: 18px 22px;
+    }}
+    h1 {{
+      font-size: 22px;
+      margin: 0 0 6px;
+    }}
+    .meta {{
+      color: #52667a;
+      font-size: 13px;
+      line-height: 1.5;
+    }}
+    main {{
+      display: grid;
+      grid-template-columns: minmax(320px, 1.15fr) minmax(320px, 0.85fr);
+      gap: 14px;
+      padding: 14px;
+    }}
+    section {{
+      background: #ffffff;
+      border: 1px solid #d8e2ec;
+      border-radius: 8px;
+      overflow: hidden;
+    }}
+    .section-title {{
+      border-bottom: 1px solid #e2e8f0;
+      font-size: 15px;
+      font-weight: 800;
+      padding: 12px 14px;
+    }}
+    #map {{
+      height: calc(100vh - 150px);
+      min-height: 440px;
+    }}
+    .chart {{
+      overflow: auto;
+      padding: 12px 14px 16px;
+    }}
+    .chart-panel {{
+      max-height: calc(100vh - 150px);
+      overflow: auto;
+    }}
+    .chart-block {{
+      border-bottom: 1px solid #e2e8f0;
+    }}
+    .chart-block:last-child {{
+      border-bottom: none;
+    }}
+    .chart svg {{
+      display: block;
+      height: auto;
+      max-width: 100%;
+    }}
+    .bar-row {{
+      align-items: center;
+      display: grid;
+      grid-template-columns: 62px 1fr 52px;
+      gap: 10px;
+      margin: 7px 0;
+    }}
+    .bar {{
+      background: #dbeafe;
+      border-radius: 4px;
+      height: 18px;
+      overflow: hidden;
+    }}
+    .bar-fill {{
+      background: #0f766e;
+      height: 100%;
+    }}
+    .count {{
+      color: #475569;
+      font-variant-numeric: tabular-nums;
+      text-align: right;
+    }}
+    .axis-label {{
+      fill: #475569;
+      font-size: 12px;
+    }}
+    .line-point {{
+      fill: #ffffff;
+      stroke-width: 2;
+    }}
+    .legend {{
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px 12px;
+      margin-bottom: 10px;
+    }}
+    .legend-item {{
+      align-items: center;
+      color: #475569;
+      display: inline-flex;
+      font-size: 12px;
+      gap: 5px;
+    }}
+    .legend-swatch {{
+      border-radius: 999px;
+      display: inline-block;
+      height: 10px;
+      width: 10px;
+    }}
+    @media (max-width: 900px) {{
+      main {{
+        grid-template-columns: 1fr;
+      }}
+      #map {{
+        height: 520px;
+      }}
+    }}
+  </style>
+</head>
+<body>
+  <header>
+    <h1>GBIF 분석 리포트</h1>
+    <div class="meta" id="summary"></div>
+  </header>
+  <main>
+    <section>
+      <div class="section-title">좌표 지도</div>
+      <div id="map"></div>
+    </section>
+    <section>
+      <div class="section-title">기록 수 비교</div>
+      <div class="chart-panel" id="chartPanel"></div>
+    </section>
+  </main>
+  <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+  <script>
+    const points = {points_json};
+    const chartList = {temporal_json};
+    const summary = {summary_json};
+    const chartType = {chart_type_json};
+    const escapeHtml = (value) => String(value)
+      .replaceAll("&", "&amp;")
+      .replaceAll("<", "&lt;")
+      .replaceAll(">", "&gt;")
+      .replaceAll('"', "&quot;")
+      .replaceAll("'", "&#039;");
+
+    document.getElementById("summary").innerHTML = `
+      일치 이름: <b>${{escapeHtml(summary.matchedName || "")}}</b> /
+      taxonKey: ${{escapeHtml(summary.taxonKey || "")}} /
+      국가: ${{escapeHtml(summary.countryCode || "ALL")}} /
+      전체 좌표 기록: ${{Number(summary.totalRecords || 0).toLocaleString()}}건 /
+      표시: ${{Number(summary.shownRecords || 0).toLocaleString()}}건
+    `;
+
+    const map = L.map("map");
+    L.tileLayer("https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png", {{
+      maxZoom: 19,
+      attribution: "&copy; OpenStreetMap contributors"
+    }}).addTo(map);
+
+    const bounds = [];
+    points.forEach((item) => {{
+      const position = [item.lat, item.lon];
+      bounds.push(position);
+      const popup = `
+        <b>${{escapeHtml(item.scientificName)}}</b><br>
+        Year: ${{escapeHtml(item.year || "")}}<br>
+        Event date: ${{escapeHtml(item.eventDate || "")}}<br>
+        Country: ${{escapeHtml(item.countryCode || "")}}<br>
+        Locality: ${{escapeHtml(item.locality || "")}}<br>
+        GBIF ID: ${{escapeHtml(item.gbifID || "")}}
+      `;
+      L.circleMarker(position, {{
+        radius: 5,
+        color: "#0f766e",
+        fillColor: "#14b8a6",
+        fillOpacity: 0.58,
+        weight: 1
+      }}).bindPopup(popup).addTo(map);
+    }});
+
+    if (bounds.length === 1) {{
+      map.setView(bounds[0], 8);
+    }} else if (bounds.length > 1) {{
+      map.fitBounds(bounds, {{ padding: [30, 30], maxZoom: 9 }});
+    }} else {{
+      map.setView([20, 0], 2);
+    }}
+
+    const chartPanel = document.getElementById("chartPanel");
+    const colors = ["#0f766e", "#2563eb", "#b45309", "#7c3aed", "#be123c", "#0891b2", "#4d7c0f", "#9333ea"];
+    const renderChart = (chartData) => {{
+      const labels = chartData.labels || [];
+      const series = chartData.series || [];
+      const allCounts = series.flatMap((line) => line.values || []);
+      const maxCount = Math.max(1, ...allCounts);
+      const legend = () => series.length > 1
+      ? `<div class="legend">${{series.map((line, index) => `
+          <span class="legend-item">
+            <span class="legend-swatch" style="background: ${{colors[index % colors.length]}}"></span>
+            ${{escapeHtml(line.name)}}
+          </span>
+        `).join("")}}</div>`
+      : "";
+      const renderBarChart = () => legend() + series.flatMap((line, seriesIndex) =>
+      labels.map((label, index) => {{
+        const value = Number((line.values || [])[index] || 0);
+        const rowLabel = series.length > 1 ? `${{line.name}} ${{label}}` : label;
+        return `
+          <div class="bar-row">
+            <div>${{escapeHtml(rowLabel)}}</div>
+            <div class="bar"><div class="bar-fill" style="width: ${{Math.max(2, value / maxCount * 100)}}%; background: ${{colors[seriesIndex % colors.length]}}"></div></div>
+            <div class="count">${{value.toLocaleString()}}</div>
+          </div>
+        `;
+      }})
+    ).join("");
+
+      const renderLineChart = () => {{
+      const width = 680;
+      const height = 320;
+      const padding = {{ top: 24, right: 28, bottom: 42, left: 52 }};
+      const plotWidth = width - padding.left - padding.right;
+      const plotHeight = height - padding.top - padding.bottom;
+      const xStep = labels.length > 1 ? plotWidth / (labels.length - 1) : 0;
+      const pointFor = (value, index) => {{
+        const x = padding.left + index * xStep;
+        const y = padding.top + plotHeight - (value / maxCount * plotHeight);
+        return {{ x, y }};
+      }};
+      const lines = series.map((line, seriesIndex) => {{
+        const color = colors[seriesIndex % colors.length];
+        const pointsAttr = (line.values || []).map((value, index) => {{
+          const point = pointFor(Number(value || 0), index);
+          return `${{point.x}},${{point.y}}`;
+        }}).join(" ");
+        const markers = (line.values || []).map((value, index) => {{
+          const numericValue = Number(value || 0);
+          const point = pointFor(numericValue, index);
+          const labelY = point.y - 10 < 12 ? point.y + 22 : point.y - 10;
+          const valueLabel = series.length === 1 || numericValue > 0
+            ? `<text class="axis-label" x="${{point.x}}" y="${{labelY}}" text-anchor="middle">${{numericValue.toLocaleString()}}</text>`
+            : "";
+          return `
+            <circle class="line-point" cx="${{point.x}}" cy="${{point.y}}" r="4" stroke="${{color}}"></circle>
+            ${{valueLabel}}
+          `;
+        }}).join("");
+        return `
+          <polyline points="${{pointsAttr}}" fill="none" stroke="${{color}}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"></polyline>
+          ${{markers}}
+        `;
+      }}).join("");
+      const axisLabels = labels.map((label, index) => {{
+        const point = pointFor(0, index);
+        const visible = labels.length <= 18 || index % Math.ceil(labels.length / 18) === 0;
+        return visible
+          ? `<text class="axis-label" x="${{point.x}}" y="${{height - 16}}" text-anchor="middle">${{escapeHtml(label)}}</text>`
+          : "";
+      }}).join("");
+      return legend() + `
+        <svg viewBox="0 0 ${{width}} ${{height}}" role="img" aria-label="연도별 기록 수 선 그래프">
+          <line x1="${{padding.left}}" y1="${{padding.top}}" x2="${{padding.left}}" y2="${{height - padding.bottom}}" stroke="#cbd5e1"></line>
+          <line x1="${{padding.left}}" y1="${{height - padding.bottom}}" x2="${{width - padding.right}}" y2="${{height - padding.bottom}}" stroke="#cbd5e1"></line>
+          <text class="axis-label" x="8" y="${{padding.top + 6}}">기록 수</text>
+          ${{lines}}
+          ${{axisLabels}}
+        </svg>
+      `;
+    }};
+
+      const body = labels.length && series.length
+      ? (chartType === "line" ? renderLineChart() : renderBarChart())
+      : `${{chartData.title}} 정보가 있는 기록이 없습니다.`;
+      return `
+        <div class="chart-block">
+          <div class="section-title">${{escapeHtml(chartData.title)}} 기록 수</div>
+          <div class="chart">${{body}}</div>
+        </div>
+      `;
+    }};
+
+    chartPanel.innerHTML = chartList.length
+      ? chartList.map(renderChart).join("")
+      : "표시할 그래프 데이터가 없습니다.";
+  </script>
+</body>
+</html>
+"""
+
+    @staticmethod
+    def _gbif_temporal_charts(
+        df: pd.DataFrame,
+        period_type: str,
+        year_from: int | None = None,
+        year_to: int | None = None,
+        month_from: int = 1,
+        month_to: int = 12,
+    ) -> list[dict]:
+        if period_type == "summary":
+            return [
+                MainWindow._gbif_temporal_chart_data(
+                    df,
+                    "year",
+                    year_from,
+                    year_to,
+                    month_from,
+                    month_to,
+                ),
+                MainWindow._gbif_temporal_chart_data(
+                    df,
+                    "month",
+                    year_from,
+                    year_to,
+                    month_from,
+                    month_to,
+                ),
+                MainWindow._gbif_temporal_chart_data(
+                    df,
+                    "season",
+                    year_from,
+                    year_to,
+                    month_from,
+                    month_to,
+                ),
+            ]
+
+        return [
+            MainWindow._gbif_temporal_chart_data(
+                df,
+                period_type,
+                year_from,
+                year_to,
+                month_from,
+                month_to,
+            )
+        ]
+
+    @staticmethod
+    def _gbif_temporal_chart_data(
+        df: pd.DataFrame,
+        period_type: str,
+        year_from: int | None = None,
+        year_to: int | None = None,
+        month_from: int = 1,
+        month_to: int = 12,
+    ) -> dict:
+        if period_type == "month":
+            month_names = [
+                "1월",
+                "2월",
+                "3월",
+                "4월",
+                "5월",
+                "6월",
+                "7월",
+                "8월",
+                "9월",
+                "10월",
+                "11월",
+                "12월",
+            ]
+            month_keys = list(range(month_from, month_to + 1))
+            series = MainWindow._gbif_period_series_by_year(
+                df,
+                year_from,
+                year_to,
+                month_keys,
+                lambda month_values, key: int((month_values == key).sum()),
+            )
+            return {
+                "title": "월별",
+                "labels": [month_names[month - 1] for month in month_keys],
+                "series": series,
+            }
+
+        if period_type == "season":
+            season_defs = [
+                ("봄", {3, 4, 5}),
+                ("여름", {6, 7, 8}),
+                ("가을", {9, 10, 11}),
+                ("겨울", {12, 1, 2}),
+            ]
+            season_defs = [
+                (label, {month for month in months if month_from <= month <= month_to})
+                for label, months in season_defs
+            ]
+            season_defs = [(label, months) for label, months in season_defs if months]
+            series = MainWindow._gbif_period_series_by_year(
+                df,
+                year_from,
+                year_to,
+                [months for _, months in season_defs],
+                lambda month_values, months: int(month_values[month_values.isin(months)].count()),
+            )
+            return {
+                "title": "계절별",
+                "labels": [label for label, _ in season_defs],
+                "series": series,
+            }
+
+        years = pd.to_numeric(df.get("year"), errors="coerce").dropna().astype(int)
+        year_counts = years.value_counts().sort_index()
+        return {
+            "title": "연도별",
+            "labels": [str(year) for year in year_counts.index],
+            "series": [
+                {
+                    "name": "전체",
+                    "values": [int(count) for count in year_counts.values],
+                }
+            ],
+        }
+
+    @staticmethod
+    def _gbif_period_series_by_year(
+        df: pd.DataFrame,
+        year_from: int | None,
+        year_to: int | None,
+        keys: list,
+        count_for_key,
+    ) -> list[dict]:
+        year_values = MainWindow._gbif_year_values(df)
+        candidate_years = sorted(year_values.unique())
+        if year_from is not None:
+            candidate_years = [year for year in candidate_years if year >= year_from]
+        if year_to is not None:
+            candidate_years = [year for year in candidate_years if year <= year_to]
+
+        if not candidate_years:
+            month_values = MainWindow._gbif_month_values(df)
+            return [
+                {
+                    "name": "전체",
+                    "values": [count_for_key(month_values, key) for key in keys],
+                }
+            ]
+
+        series = []
+        for year in candidate_years:
+            year_df = df.loc[year_values.reindex(df.index).eq(year)]
+            month_values = MainWindow._gbif_month_values(year_df)
+            series.append(
+                {
+                    "name": str(year),
+                    "values": [count_for_key(month_values, key) for key in keys],
+                }
+            )
+        return series
+
+    @staticmethod
+    def _filter_gbif_dataframe(
+        df: pd.DataFrame,
+        year_from: int | None,
+        year_to: int | None,
+        month_from: int,
+        month_to: int,
+    ) -> pd.DataFrame:
+        filtered_df = df.copy()
+        if filtered_df.empty:
+            return filtered_df
+
+        if year_from is not None or year_to is not None:
+            year_values = MainWindow._gbif_year_values(filtered_df).reindex(filtered_df.index)
+            mask = pd.Series(True, index=filtered_df.index)
+            if year_from is not None:
+                mask &= year_values.ge(year_from).fillna(False)
+            if year_to is not None:
+                mask &= year_values.le(year_to).fillna(False)
+            filtered_df = filtered_df.loc[mask]
+
+        if month_from > 1 or month_to < 12:
+            month_values = MainWindow._gbif_month_values(filtered_df).reindex(filtered_df.index)
+            mask = month_values.ge(month_from).fillna(False) & month_values.le(month_to).fillna(False)
+            filtered_df = filtered_df.loc[mask]
+
+        return filtered_df
+
+    @staticmethod
+    def _gbif_year_values(df: pd.DataFrame) -> pd.Series:
+        if "year" not in df.columns:
+            return pd.Series(dtype="int64")
+
+        return pd.to_numeric(df["year"], errors="coerce").dropna().astype(int)
+
+    @staticmethod
+    def _gbif_month_values(df: pd.DataFrame) -> pd.Series:
+        if "month" in df.columns:
+            month_values = pd.to_numeric(df["month"], errors="coerce")
+        else:
+            month_values = pd.Series(float("nan"), index=df.index, dtype="float64")
+
+        if "eventDate" in df.columns:
+            parsed_months = pd.to_datetime(
+                df["eventDate"],
+                errors="coerce",
+                utc=True,
+            ).dt.month
+            month_values = month_values.fillna(parsed_months)
+
+        return month_values.dropna().astype(int).loc[lambda values: values.between(1, 12)]
+
     def _build_auto_mapping_settings_tab(self) -> QWidget:
         panel = QWidget()
         layout = QVBoxLayout(panel)
@@ -853,6 +2075,21 @@ class MainWindow(QMainWindow):
             self.settings.setValue("file_dialog/last_save_dir", str(parent_dir))
 
     def load_excel(self):
+        file_path = self._select_source_file()
+        if not file_path:
+            return
+
+        try:
+            selected_sheet = self._select_source_sheet(file_path)
+            if not selected_sheet:
+                return
+
+            raw_df = ExcelService.read_excel_raw(file_path, sheet_name=selected_sheet)
+            self._apply_loaded_file(file_path, selected_sheet, raw_df)
+        except Exception as e:
+            QMessageBox.critical(self, "오류", f"엑셀 파일을 불러오지 못했습니다.\n\n{e}")
+
+    def _select_source_file(self) -> str | None:
         file_path, _ = QFileDialog.getOpenFileName(
             self,
             "파일 선택",
@@ -860,50 +2097,39 @@ class MainWindow(QMainWindow):
             "Excel/CSV Files (*.xlsx *.xls *.csv)",
         )
         if not file_path:
-            return
+            return None
+
         self._remember_open_dir(file_path)
+        return file_path
 
-        try:
-            sheet_names = ExcelService.get_sheet_names(file_path)
-            if not sheet_names:
-                raise ValueError("시트가 없는 엑셀 파일입니다.")
+    def _select_source_sheet(self, file_path: str) -> str | None:
+        sheet_names = ExcelService.get_sheet_names(file_path)
+        if not sheet_names:
+            raise ValueError("시트가 없는 엑셀 파일입니다.")
 
-            selected_sheet, ok = QInputDialog.getItem(
-                self,
-                "시트 선택",
-                "불러올 시트를 선택하세요:",
-                sheet_names,
-                0,
-                False,
-            )
-            if not ok or not selected_sheet:
-                return
+        selected_sheet, ok = QInputDialog.getItem(
+            self,
+            "시트 선택",
+            "불러올 시트를 선택하세요:",
+            sheet_names,
+            0,
+            False,
+        )
+        if not ok or not selected_sheet:
+            return None
 
-            raw_df = ExcelService.read_excel_raw(file_path, sheet_name=selected_sheet)
-            # 파일 초기화
-            self._set_loaded_file_state(file_path,selected_sheet,raw_df)
+        return selected_sheet
 
-            # UI 초기화(라벨 갱신)
-            self._update_loaded_file_labels(self,file_path, sheet_name=selected_sheet)
-        
-                
-            self.show_preview_raw(self.raw_df)
-            self.clear_mapping_ui()
-            self.result_table.clear()
-            self.result_table.setRowCount(0)
-            self.result_table.setColumnCount(0)
-            self.reset_missing_summary_panel()
-            
-            # 버튼 상태 초기화
-            self._set_file_loaded_buttons_enabled(self)
+    def _apply_loaded_file(self, file_path: str, sheet_name: str, raw_df: pd.DataFrame) -> None:
+        self._set_loaded_file_state(file_path, sheet_name, raw_df)
+        self._reset_loaded_file_ui(file_path, sheet_name, raw_df)
 
-
-        except Exception as e:
-            QMessageBox.critical(self, "오류", f"엑셀 파일을 불러오지 못했습니다.\n\n{e}")
-            
-    
-    # 파일을 새로 불러올 때마다 관련 상태를 초기화하는 메서드
-    def _set_loaded_file_state(self, file_path, sheet_name, raw_df):
+    def _set_loaded_file_state(
+        self,
+        file_path: str,
+        sheet_name: str,
+        raw_df: pd.DataFrame,
+    ) -> None:
         self.raw_df = raw_df
         self.current_file_path = file_path
         self.current_sheet_name = sheet_name
@@ -911,16 +2137,29 @@ class MainWindow(QMainWindow):
         self.result_df = None
         self.selected_header_row = None
         self._reset_active_fields()
-    
-    
-    def _update_loaded_file_labels(self, file_path, sheet_name):
+
+    def _reset_loaded_file_ui(
+        self,
+        file_path: str,
+        sheet_name: str,
+        raw_df: pd.DataFrame,
+    ) -> None:
+        self._update_loaded_file_labels(file_path, sheet_name)
+        self.show_preview_raw(raw_df)
+        self.clear_mapping_ui()
+        self.result_table.clear()
+        self.result_table.setRowCount(0)
+        self.result_table.setColumnCount(0)
+        self.reset_missing_summary_panel()
+        self._set_file_loaded_buttons_enabled()
+
+    def _update_loaded_file_labels(self, file_path: str, sheet_name: str) -> None:
         self.lbl_file.setText(f"파일: {Path(file_path).name}")
         self.lbl_sheet.setText(sheet_name)
         self.lbl_header.setText("선택된 헤더 행: 없음")
         self.preview_position_label.setText("현재 선택 위치: 없음")
-        
-    
-    def _set_file_loaded_buttons_enabled(self):
+
+    def _set_file_loaded_buttons_enabled(self) -> None:
         self.btn_apply_header.setEnabled(True)
         self.btn_add_field.setEnabled(False)
         self.btn_source_coordinate_preview.setEnabled(False)
@@ -989,40 +2228,30 @@ class MainWindow(QMainWindow):
                     item.setBackground(QColor("#fff4bf") if r == row else QColor("#ffffff"))
 
     def apply_selected_header(self):
+        # 헤더 적용 전에 필요한 상태인지 체크
         if self.current_file_path is None or self.raw_df is None:
             QMessageBox.warning(self, "경고", "먼저 엑셀 파일을 업로드해주세요.")
             return
 
+        # 헤더로 사용할 행이 선택되었는지 체크
         if self.selected_header_row is None:
             QMessageBox.warning(self, "경고", "헤더로 사용할 행을 먼저 클릭하세요.")
             return
 
         try:
-            self.source_df = ExcelService.read_excel_with_header(
+            # 선택된 행을 헤더로 적용해서 데이터프레임 다시 불러오기
+            source_df = ExcelService.read_excel_with_header(
                 self.current_file_path,
                 header_row=self.selected_header_row,
                 sheet_name=self.current_sheet_name,
             )
+            
+            # 열 이름 정리 (공백 제거, 중복 방지 등)
+            source_df.columns = ExcelService.clean_column_names(source_df.columns)
+            # 헤더 적용된 데이터프레임으로 UI 업데이트
+            self._apply_header_data(source_df)
 
-            cleaned_columns = []
-            for idx, col in enumerate(self.source_df.columns):
-                col_text = str(col).strip()
-                if not col_text or col_text.lower().startswith("unnamed:"):
-                    col_text = f"Column_{idx + 1}"
-                cleaned_columns.append(col_text)
-
-            self.source_df.columns = cleaned_columns
-            self.show_preview_with_header(self.source_df)
-            self.preview_position_label.setText(
-                f"현재 선택 위치: {self.selected_header_row + 1}행 (헤더 적용됨, 열 선택은 마지막 클릭 기준)"
-            )
-            self.build_mapping_ui(self.source_df.columns.tolist())
-            self.btn_add_field.setEnabled(True)
-            self.btn_source_coordinate_preview.setEnabled(True)
-            self.btn_preview_result.setEnabled(True)
-            self.btn_coordinate_preview.setEnabled(False)
-            self.btn_export.setEnabled(False)
-
+            # 적용 완료 메시지
             QMessageBox.information(
                 self,
                 "완료",
@@ -1031,6 +2260,25 @@ class MainWindow(QMainWindow):
 
         except Exception as e:
             QMessageBox.critical(self, "오류", f"헤더 적용 중 오류가 발생했습니다.\n\n{e}")
+
+    # 헤더가 적용된 데이터프레임으로 UI 업데이트
+    def _apply_header_data(self, source_df: pd.DataFrame) -> None:
+        self.source_df = source_df
+        self.show_preview_with_header(source_df)
+        self.preview_position_label.setText(
+            f"현재 선택 위치: {self.selected_header_row + 1}행 (헤더 적용됨, 열 선택은 마지막 클릭 기준)"
+        )
+        # 헤더가 적용된 데이터프레임의 열 이름을 기준으로 매핑 UI 구축
+        self.build_mapping_ui(source_df.columns.tolist())
+        # 헤더가 적용되었으므로 관련 버튼 활성화
+        self._set_header_applied_buttons_enabled()
+
+    def _set_header_applied_buttons_enabled(self) -> None:
+        self.btn_add_field.setEnabled(True)
+        self.btn_source_coordinate_preview.setEnabled(True)
+        self.btn_preview_result.setEnabled(True)
+        self.btn_coordinate_preview.setEnabled(False)
+        self.btn_export.setEnabled(False)
 
     def add_optional_field(self):
         if self.source_df is None:
