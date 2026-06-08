@@ -841,6 +841,17 @@ class MainWindow(QMainWindow):
         if parent_dir.is_dir():
             self.settings.setValue("file_dialog/last_open_dir", str(parent_dir))
 
+    def _get_last_save_dir(self) -> str:
+        last_dir = self.settings.value("file_dialog/last_save_dir", "", str)
+        if last_dir and Path(last_dir).is_dir():
+            return last_dir
+        return str(OUTPUT_DIR)
+
+    def _remember_save_dir(self, file_path: str) -> None:
+        parent_dir = Path(file_path).expanduser().parent
+        if parent_dir.is_dir():
+            self.settings.setValue("file_dialog/last_save_dir", str(parent_dir))
+
     def load_excel(self):
         file_path, _ = QFileDialog.getOpenFileName(
             self,
@@ -868,36 +879,55 @@ class MainWindow(QMainWindow):
             if not ok or not selected_sheet:
                 return
 
-            self.raw_df = ExcelService.read_excel_raw(file_path, sheet_name=selected_sheet)
-            self.current_file_path = file_path
-            self.current_sheet_name = selected_sheet
-            self.source_df = None
-            self.result_df = None
-            self.selected_header_row = None
-            self._reset_active_fields()
+            raw_df = ExcelService.read_excel_raw(file_path, sheet_name=selected_sheet)
+            # 파일 초기화
+            self._set_loaded_file_state(file_path,selected_sheet,raw_df)
 
-            self.lbl_file.setText(f"파일: {Path(file_path).name}")
-            self.lbl_sheet.setText(selected_sheet)
-            self.lbl_header.setText("선택된 헤더 행: 없음")
-            self.preview_position_label.setText("현재 선택 위치: 없음")
-
+            # UI 초기화(라벨 갱신)
+            self._update_loaded_file_labels(self,file_path, sheet_name=selected_sheet)
+        
+                
             self.show_preview_raw(self.raw_df)
             self.clear_mapping_ui()
             self.result_table.clear()
             self.result_table.setRowCount(0)
             self.result_table.setColumnCount(0)
             self.reset_missing_summary_panel()
+            
+            # 버튼 상태 초기화
+            self._set_file_loaded_buttons_enabled(self)
 
-            self.btn_apply_header.setEnabled(True)
-            self.btn_add_field.setEnabled(False)
-            self.btn_source_coordinate_preview.setEnabled(False)
-            self.btn_preview_result.setEnabled(False)
-            self.btn_coordinate_preview.setEnabled(False)
-            self.btn_export.setEnabled(False)
 
         except Exception as e:
             QMessageBox.critical(self, "오류", f"엑셀 파일을 불러오지 못했습니다.\n\n{e}")
-
+            
+    
+    # 파일을 새로 불러올 때마다 관련 상태를 초기화하는 메서드
+    def _set_loaded_file_state(self, file_path, sheet_name, raw_df):
+        self.raw_df = raw_df
+        self.current_file_path = file_path
+        self.current_sheet_name = sheet_name
+        self.source_df = None
+        self.result_df = None
+        self.selected_header_row = None
+        self._reset_active_fields()
+    
+    
+    def _update_loaded_file_labels(self, file_path, sheet_name):
+        self.lbl_file.setText(f"파일: {Path(file_path).name}")
+        self.lbl_sheet.setText(sheet_name)
+        self.lbl_header.setText("선택된 헤더 행: 없음")
+        self.preview_position_label.setText("현재 선택 위치: 없음")
+        
+    
+    def _set_file_loaded_buttons_enabled(self):
+        self.btn_apply_header.setEnabled(True)
+        self.btn_add_field.setEnabled(False)
+        self.btn_source_coordinate_preview.setEnabled(False)
+        self.btn_preview_result.setEnabled(False)
+        self.btn_coordinate_preview.setEnabled(False)
+        self.btn_export.setEnabled(False)
+    
     def show_preview_raw(self, df):
         preview_df = df
 
@@ -1207,7 +1237,7 @@ class MainWindow(QMainWindow):
             output_path, _ = QFileDialog.getSaveFileName(
                 self,
                 "저장할 파일 경로 선택",
-                str(OUTPUT_DIR / "dwc_mapped_output.xlsx"),
+                str(Path(self._get_last_save_dir()) / "dwc_mapped_output.xlsx"),
                 "Excel Files (*.xlsx)",
             )
 
@@ -1215,6 +1245,7 @@ class MainWindow(QMainWindow):
                 return
 
             ExcelService.save_excel(final_df, output_path)
+            self._remember_save_dir(output_path)
             QMessageBox.information(self, "완료", f"엑셀 파일이 저장되었습니다.\n\n{output_path}")
 
         except Exception as e:
@@ -1328,13 +1359,39 @@ class MainWindow(QMainWindow):
         dialog_title: str,
     ):
         markers = []
-        invalid_count = 0
+        invalid_coordinates = []
 
         for idx, row in df.iterrows():
-            lat = pd.to_numeric(row.get(lat_column), errors="coerce")
-            lon = pd.to_numeric(row.get(lon_column), errors="coerce")
-            if pd.isna(lat) or pd.isna(lon) or not (-90 <= lat <= 90) or not (-180 <= lon <= 180):
-                invalid_count += 1
+            row_number = int(idx) + 1
+            raw_lat = row.get(lat_column)
+            raw_lon = row.get(lon_column)
+            lat = pd.to_numeric(raw_lat, errors="coerce")
+            lon = pd.to_numeric(raw_lon, errors="coerce")
+            invalid_reasons = []
+
+            if pd.isna(raw_lat) or str(raw_lat).strip() == "":
+                invalid_reasons.append("위도 없음")
+            elif pd.isna(lat):
+                invalid_reasons.append("위도 숫자 아님")
+            elif not (-90 <= lat <= 90):
+                invalid_reasons.append("위도 범위 초과")
+
+            if pd.isna(raw_lon) or str(raw_lon).strip() == "":
+                invalid_reasons.append("경도 없음")
+            elif pd.isna(lon):
+                invalid_reasons.append("경도 숫자 아님")
+            elif not (-180 <= lon <= 180):
+                invalid_reasons.append("경도 범위 초과")
+
+            if invalid_reasons:
+                invalid_coordinates.append(
+                    {
+                        "rowNumber": row_number,
+                        "latitude": "" if pd.isna(raw_lat) else str(raw_lat).strip(),
+                        "longitude": "" if pd.isna(raw_lon) else str(raw_lon).strip(),
+                        "reason": ", ".join(invalid_reasons),
+                    }
+                )
                 continue
 
             details = []
@@ -1348,42 +1405,76 @@ class MainWindow(QMainWindow):
 
             markers.append(
                 {
-                    "rowNumber": int(idx) + 1,
+                    "rowNumber": row_number,
                     "lat": float(lat),
                     "lon": float(lon),
                     "details": details,
                 }
             )
 
+        map_path = OUTPUT_DIR / "coordinate_preview_map.html"
+        invalid_report_path = OUTPUT_DIR / "coordinate_invalid_rows.csv"
+
         if not markers:
+            invalid_message = ""
+            if invalid_coordinates:
+                try:
+                    pd.DataFrame(invalid_coordinates).to_csv(
+                        invalid_report_path,
+                        index=False,
+                        encoding="utf-8-sig",
+                    )
+                    invalid_message = f"\n\n제외 좌표 목록: {invalid_report_path}"
+                except Exception as e:
+                    QMessageBox.critical(self, "오류", f"제외 좌표 목록 저장 중 오류가 발생했습니다.\n\n{e}")
+                    return
             QMessageBox.warning(
                 self,
                 "좌표 없음",
-                f"지도에 표시할 수 있는 {lat_column} / {lon_column} 값이 없습니다.",
+                f"지도에 표시할 수 있는 {lat_column} / {lon_column} 값이 없습니다."
+                f"{invalid_message}",
             )
             return
 
-        map_path = OUTPUT_DIR / "coordinate_preview_map.html"
-
         try:
+            if invalid_coordinates:
+                pd.DataFrame(invalid_coordinates).to_csv(
+                    invalid_report_path,
+                    index=False,
+                    encoding="utf-8-sig",
+                )
             map_path.write_text(
-                self._coordinate_preview_map_html(markers, invalid_count),
+                self._coordinate_preview_map_html(markers, invalid_coordinates),
                 encoding="utf-8",
             )
             QDesktopServices.openUrl(QUrl.fromLocalFile(str(map_path)))
+            invalid_lines = ""
+            if invalid_coordinates:
+                preview_rows = ", ".join(
+                    str(item["rowNumber"]) for item in invalid_coordinates[:20]
+                )
+                more_count = len(invalid_coordinates) - 20
+                if more_count > 0:
+                    preview_rows += f" 외 {more_count}개"
+                invalid_lines = (
+                    f"\n제외된 행: {preview_rows}"
+                    f"\n제외 좌표 목록: {invalid_report_path}"
+                )
             QMessageBox.information(
                 self,
                 dialog_title,
                 f"좌표 지도 미리보기를 생성했습니다.\n\n{map_path}\n\n"
                 f"표시된 좌표: {len(markers)}개\n"
-                f"제외된 좌표: {invalid_count}개",
+                f"제외된 좌표: {len(invalid_coordinates)}개"
+                f"{invalid_lines}",
             )
         except Exception as e:
             QMessageBox.critical(self, "오류", f"{dialog_title} 중 오류가 발생했습니다.\n\n{e}")
 
     @staticmethod
-    def _coordinate_preview_map_html(markers: list[dict], invalid_count: int) -> str:
+    def _coordinate_preview_map_html(markers: list[dict], invalid_coordinates: list[dict]) -> str:
         marker_json = json.dumps(markers, ensure_ascii=False)
+        invalid_json = json.dumps(invalid_coordinates[:50], ensure_ascii=False)
         return f"""<!doctype html>
 <html lang="ko">
 <head>
@@ -1414,6 +1505,17 @@ class MainWindow(QMainWindow):
       font-size: 14px;
       margin-bottom: 4px;
     }}
+    .invalid-list {{
+      border-top: 1px solid #e2e8f0;
+      margin-top: 8px;
+      max-height: 180px;
+      overflow: auto;
+      padding-top: 6px;
+    }}
+    .invalid-row {{
+      margin: 3px 0;
+      white-space: nowrap;
+    }}
     .popup-title {{
       color: #0f766e;
       font-weight: 800;
@@ -1432,7 +1534,8 @@ class MainWindow(QMainWindow):
   <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
   <script>
     const markers = {marker_json};
-    const invalidCount = {invalid_count};
+    const invalidCoordinates = {invalid_json};
+    const invalidCount = {len(invalid_coordinates)};
     const map = L.map("map");
 
     L.tileLayer("https://{{s}}.tile.openstreetmap.org/{{z}}/{{x}}/{{y}}.png", {{
@@ -1479,10 +1582,17 @@ class MainWindow(QMainWindow):
     const summary = L.control({{ position: "topright" }});
     summary.onAdd = function() {{
       const div = L.DomUtil.create("div", "summary");
+      const invalidRows = invalidCoordinates.map((item) =>
+        `<div class="invalid-row">Row ${{item.rowNumber}}: ${{escapeHtml(item.reason)}}</div>`
+      ).join("");
+      const moreInvalid = invalidCount > invalidCoordinates.length
+        ? `<div class="invalid-row">...and ${{invalidCount - invalidCoordinates.length}} more</div>`
+        : "";
       div.innerHTML = `
         <strong>Coordinate Preview</strong>
         Displayed: ${{markers.length}}<br>
         Invalid / blank: ${{invalidCount}}
+        ${{invalidCount ? `<div class="invalid-list">${{invalidRows}}${{moreInvalid}}</div>` : ""}}
       `;
       return div;
     }};

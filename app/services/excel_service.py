@@ -14,14 +14,8 @@ class ExcelService:
         "decimalLongitude",
     }
 
-    @staticmethod
-    def _validate_excel_path(file_path: str) -> None:
-        path = Path(file_path)
-        suffix = path.suffix.lower()
 
-        if suffix not in ExcelService.EXCEL_EXTENSIONS:
-            raise ValueError("지원하지 않는 파일 형식입니다. .xlsx 또는 .xls 파일만 가능합니다.")
-
+    # 지원하는 파일 형식인지 검증하는 메서드
     @staticmethod
     def _validate_supported_path(file_path: str) -> None:
         path = Path(file_path)
