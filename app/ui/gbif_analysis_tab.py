@@ -31,7 +31,7 @@ from PySide6.QtWidgets import (
 
 from app.config.app_info import APP_NAME, AUTHOR_NAME
 from app.config.country_code import ISO_COUNTRY_CODES
-from app.services.gbif_service import GbifOccurrenceCriteria, GbifService
+from app.services.gbif_service import GbifFetchCancelled, GbifOccurrenceCriteria, GbifService
 from app.utils.paths import OUTPUT_DIR
 
 
@@ -607,6 +607,12 @@ class GbifAnalysisTab(QWidget):
             )
             if not has_data:
                 QMessageBox.information(self, "GBIF 분석", "일치하는 좌표 기록이 없습니다.")
+        except GbifFetchCancelled:
+            self.reset_gbif_analysis_state(clear_raw=True)
+            self.gbif_search_summary = None
+            self.update_gbif_year_range(pd.DataFrame())
+            self.set_gbif_analysis_buttons_enabled(False)
+            self.gbif_summary_label.setText("GBIF 데이터 가져오기가 취소되었습니다.")
         except Exception as e:
             self.reset_gbif_analysis_state(clear_raw=True)
             self.gbif_search_summary = None

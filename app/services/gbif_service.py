@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from base64 import b64encode
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
 from hashlib import sha256
 from urllib.error import HTTPError, URLError
@@ -37,6 +37,10 @@ class GbifDownloadRequestResult:
     status_url: str
     download_url: str
     citation_url: str
+
+
+class GbifFetchCancelled(RuntimeError):
+    pass
 
 
 @dataclass
@@ -242,6 +246,7 @@ class GbifService:
         page_size = min(300, requested_limit)
         rows = []
         total_records = 0
+        cancel_message = "GBIF 데이터 가져오기가 취소되었습니다."
 
         base_params = {
             "hasCoordinate": "true",
@@ -275,10 +280,19 @@ class GbifService:
         rows.extend(first_results)
 
         target_records = min(requested_limit, total_records or requested_limit)
-        if progress_callback is not None:
-            should_continue = progress_callback(len(rows), total_records, requested_limit)
+
+        def check_cancel(fetched_count: int | None = None) -> None:
+            if progress_callback is None:
+                return
+            should_continue = progress_callback(
+                min(fetched_count if fetched_count is not None else len(rows), target_records),
+                total_records,
+                requested_limit,
+            )
             if should_continue is False:
-                raise RuntimeError("GBIF 데이터 가져오기가 취소되었습니다.")
+                raise GbifFetchCancelled(cancel_message)
+
+        check_cancel(len(rows))
 
         if first_results and not first_payload.get("endOfRecords", False) and len(rows) < target_records:
             offsets = list(range(len(rows), target_records, page_size))
@@ -291,25 +305,26 @@ class GbifService:
                 payload = cls._get_json("/occurrence/search", params)
                 return payload.get("results", [])
 
-            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            executor = ThreadPoolExecutor(max_workers=worker_count)
+            try:
                 future_map = {executor.submit(fetch_page, offset): offset for offset in offsets}
-                try:
-                    for future in as_completed(future_map):
+                pending = set(future_map)
+                while pending:
+                    check_cancel(len(rows))
+                    done, pending = wait(pending, timeout=0.2, return_when=FIRST_COMPLETED)
+                    if not done:
+                        continue
+                    for future in done:
                         page_results = future.result()
                         if page_results:
                             rows.extend(page_results)
-                        if progress_callback is not None:
-                            should_continue = progress_callback(
-                                min(len(rows), target_records),
-                                total_records,
-                                requested_limit,
-                            )
-                            if should_continue is False:
-                                for pending in future_map:
-                                    pending.cancel()
-                                raise RuntimeError("GBIF 데이터 가져오기가 취소되었습니다.")
-                finally:
-                    executor.shutdown(wait=False, cancel_futures=True)
+                        check_cancel(len(rows))
+            except GbifFetchCancelled:
+                for future in future_map:
+                    future.cancel()
+                raise
+            finally:
+                executor.shutdown(wait=False, cancel_futures=True)
 
         if len(rows) > target_records:
             rows = rows[:target_records]
