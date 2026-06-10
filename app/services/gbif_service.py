@@ -2,14 +2,22 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from base64 import b64encode
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
+from hashlib import sha256
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 import json
+
 import pandas as pd
+
+from app.utils.paths import CACHE_DIR
 
 
 GBIF_API_BASE = "https://api.gbif.org/v1"
+GBIF_CACHE_DIR = CACHE_DIR / "gbif"
+GBIF_CACHE_DIR.mkdir(parents=True, exist_ok=True)
 
 
 @dataclass
@@ -20,6 +28,7 @@ class GbifSearchResult:
     status: str
     total_records: int
     dataframe: pd.DataFrame
+    from_cache: bool = False
 
 
 @dataclass
@@ -30,7 +39,54 @@ class GbifDownloadRequestResult:
     citation_url: str
 
 
+@dataclass
+class GbifOccurrenceCriteria:
+    scientific_name: str = ""
+    taxon_key: int | None = None
+    dataset_key: str = ""
+    country_code: str = ""
+    geometry: str = ""
+    basis_of_record: str = ""
+    limit: int = 100000
+    year_from: int | None = None
+    year_to: int | None = None
+    month_from: int = 1
+    month_to: int = 12
+
+
 class GbifService:
+    @staticmethod
+    def _cache_key(params: dict) -> str:
+        normalized = json.dumps(params, ensure_ascii=False, sort_keys=True)
+        return sha256(normalized.encode("utf-8")).hexdigest()
+
+    @staticmethod
+    def _cache_path(cache_key: str):
+        return GBIF_CACHE_DIR / f"{cache_key}.json"
+
+    @classmethod
+    def _read_occurrence_cache(cls, cache_key: str) -> dict | None:
+        cache_path = cls._cache_path(cache_key)
+        if not cache_path.exists():
+            return None
+
+        try:
+            return json.loads(cache_path.read_text(encoding="utf-8"))
+        except Exception:
+            return None
+
+    @classmethod
+    def _write_occurrence_cache(cls, cache_key: str, payload: dict) -> None:
+        cache_path = cls._cache_path(cache_key)
+        cache_payload = {
+            "cachedAt": datetime.now(timezone.utc).isoformat(),
+            **payload,
+        }
+        cache_path.write_text(
+            json.dumps(cache_payload, ensure_ascii=False),
+            encoding="utf-8",
+        )
+
     @staticmethod
     def _get_json(path: str, params: dict | None = None) -> dict:
         query = f"?{urlencode(params or {}, doseq=True)}" if params else ""
@@ -42,7 +98,11 @@ class GbifService:
             with urlopen(request, timeout=30) as response:
                 return json.loads(response.read().decode("utf-8"))
         except HTTPError as e:
-            raise RuntimeError(f"GBIF API 응답 오류: HTTP {e.code}") from e
+            detail = e.read().decode("utf-8", errors="replace").strip()
+            message = f"GBIF API 응답 오류: HTTP {e.code}"
+            if detail:
+                message = f"{message}\n{detail}"
+            raise RuntimeError(message) from e
         except URLError as e:
             raise RuntimeError(f"GBIF API에 연결할 수 없습니다: {e.reason}") from e
         except TimeoutError as e:
@@ -93,57 +153,199 @@ class GbifService:
         cls,
         scientific_name: str,
         country_code: str = "",
+        basis_of_record: str = "",
         limit: int = 300,
+        use_cache: bool = True,
+        year_from: int | None = None,
+        year_to: int | None = None,
+        month_from: int = 1,
+        month_to: int = 12,
+        progress_callback=None,
+        max_workers: int = 4,
     ) -> GbifSearchResult:
-        match = cls.match_species(scientific_name)
-        taxon_key = match.get("usageKey")
-        if not taxon_key:
-            raise RuntimeError("GBIF에서 일치하는 taxonKey를 찾지 못했습니다.")
+        return cls.fetch_occurrences_by_criteria(
+            GbifOccurrenceCriteria(
+                scientific_name=scientific_name,
+                country_code=country_code,
+                basis_of_record=basis_of_record,
+                limit=limit,
+                year_from=year_from,
+                year_to=year_to,
+                month_from=month_from,
+                month_to=month_to,
+            ),
+            use_cache=use_cache,
+            progress_callback=progress_callback,
+            max_workers=max_workers,
+        )
 
-        requested_limit = max(1, min(int(limit), 100000))
+    @classmethod
+    def fetch_occurrences_by_criteria(
+        cls,
+        criteria: GbifOccurrenceCriteria,
+        use_cache: bool = True,
+        progress_callback=None,
+        max_workers: int = 4,
+    ) -> GbifSearchResult:
+        scientific_name = criteria.scientific_name.strip()
+        country_code = criteria.country_code.strip().upper()
+        basis_of_record = criteria.basis_of_record.strip().upper()
+        dataset_key = criteria.dataset_key.strip()
+        geometry = criteria.geometry.strip()
+        taxon_key = criteria.taxon_key
+        requested_limit = max(1, min(int(criteria.limit), 100000))
+        cache_params = {
+            "scientificName": scientific_name,
+            "taxonKey": taxon_key,
+            "datasetKey": dataset_key,
+            "countryCode": country_code,
+            "geometry": geometry,
+            "basisOfRecord": basis_of_record,
+            "limit": requested_limit,
+            "hasCoordinate": True,
+            "yearFrom": criteria.year_from,
+            "yearTo": criteria.year_to,
+            "monthFrom": criteria.month_from,
+            "monthTo": criteria.month_to,
+        }
+        cache_key = cls._cache_key(cache_params)
+
+        if use_cache:
+            cached = cls._read_occurrence_cache(cache_key)
+            if cached:
+                match = cached.get("match", {})
+                return GbifSearchResult(
+                    matched_name=match.get("scientificName") or scientific_name or dataset_key or "Custom criteria",
+                    taxon_key=match.get("usageKey") or taxon_key,
+                    rank=match.get("rank", ""),
+                    status=match.get("status", ""),
+                    total_records=int(cached.get("totalRecords", 0) or 0),
+                    dataframe=cls._to_dataframe(cached.get("records", [])),
+                    from_cache=True,
+                )
+
+        match = {}
+        if taxon_key is None and scientific_name:
+            match = cls.match_species(scientific_name)
+            taxon_key = match.get("usageKey")
+            if not taxon_key:
+                raise RuntimeError("GBIF에서 일치하는 taxonKey를 찾지 못했습니다.")
+        elif taxon_key is not None:
+            match = {
+                "scientificName": scientific_name or f"taxonKey {taxon_key}",
+                "usageKey": taxon_key,
+            }
+
+        if taxon_key is None and not dataset_key and not country_code and not geometry:
+            raise ValueError("학명/taxonKey, datasetKey, 국가코드, geometry 중 하나 이상을 입력하세요.")
+
         page_size = min(300, requested_limit)
         rows = []
         total_records = 0
 
         base_params = {
-            "taxon_key": taxon_key,
             "hasCoordinate": "true",
             "limit": page_size,
         }
-        if country_code.strip():
-            base_params["country"] = country_code.strip().upper()
+        if taxon_key is not None:
+            base_params["taxon_key"] = taxon_key
+        if dataset_key:
+            base_params["dataset_key"] = dataset_key
+        if country_code:
+            base_params["country"] = country_code
+        if geometry:
+            base_params["geometry"] = geometry
+        if basis_of_record:
+            base_params["basis_of_record"] = basis_of_record
+        if criteria.year_from is not None and criteria.year_to is not None:
+            base_params["year"] = f"{criteria.year_from},{criteria.year_to}"
+        elif criteria.year_from is not None:
+            base_params["year"] = f"{criteria.year_from},"
+        elif criteria.year_to is not None:
+            base_params["year"] = f",{criteria.year_to}"
+        if criteria.month_from > 1 or criteria.month_to < 12:
+            base_params["month"] = f"{criteria.month_from},{criteria.month_to}"
 
-        while len(rows) < requested_limit:
-            params = dict(base_params)
-            params["offset"] = len(rows)
-            params["limit"] = min(page_size, requested_limit - len(rows))
-            payload = cls._get_json("/occurrence/search", params)
-            total_records = int(payload.get("count", 0) or 0)
-            results = payload.get("results", [])
-            if not results:
-                break
-            rows.extend(results)
-            if payload.get("endOfRecords", False):
-                break
+        first_params = dict(base_params)
+        first_params["offset"] = 0
+        first_params["limit"] = page_size
+        first_payload = cls._get_json("/occurrence/search", first_params)
+        total_records = int(first_payload.get("count", 0) or 0)
+        first_results = first_payload.get("results", [])
+        rows.extend(first_results)
+
+        target_records = min(requested_limit, total_records or requested_limit)
+        if progress_callback is not None:
+            should_continue = progress_callback(len(rows), total_records, requested_limit)
+            if should_continue is False:
+                raise RuntimeError("GBIF 데이터 가져오기가 취소되었습니다.")
+
+        if first_results and not first_payload.get("endOfRecords", False) and len(rows) < target_records:
+            offsets = list(range(len(rows), target_records, page_size))
+            worker_count = max(1, min(int(max_workers), 8, len(offsets)))
+
+            def fetch_page(offset: int) -> list[dict]:
+                params = dict(base_params)
+                params["offset"] = offset
+                params["limit"] = min(page_size, target_records - offset)
+                payload = cls._get_json("/occurrence/search", params)
+                return payload.get("results", [])
+
+            with ThreadPoolExecutor(max_workers=worker_count) as executor:
+                future_map = {executor.submit(fetch_page, offset): offset for offset in offsets}
+                try:
+                    for future in as_completed(future_map):
+                        page_results = future.result()
+                        if page_results:
+                            rows.extend(page_results)
+                        if progress_callback is not None:
+                            should_continue = progress_callback(
+                                min(len(rows), target_records),
+                                total_records,
+                                requested_limit,
+                            )
+                            if should_continue is False:
+                                for pending in future_map:
+                                    pending.cancel()
+                                raise RuntimeError("GBIF 데이터 가져오기가 취소되었습니다.")
+                finally:
+                    executor.shutdown(wait=False, cancel_futures=True)
+
+        if len(rows) > target_records:
+            rows = rows[:target_records]
 
         dataframe = cls._to_dataframe(rows)
+        cls._write_occurrence_cache(
+            cache_key,
+            {
+                "params": cache_params,
+                "match": match,
+                "totalRecords": total_records,
+                "records": rows,
+            },
+        )
         return GbifSearchResult(
-            matched_name=match.get("scientificName") or scientific_name.strip(),
+            matched_name=match.get("scientificName") or scientific_name or dataset_key or "Custom criteria",
             taxon_key=taxon_key,
             rank=match.get("rank", ""),
             status=match.get("status", ""),
             total_records=total_records,
             dataframe=dataframe,
+            from_cache=False,
         )
 
     @classmethod
     def request_occurrence_download(
         cls,
-        scientific_name: str,
-        country_code: str,
-        username: str,
-        password: str,
-        email: str,
+        scientific_name: str = "",
+        country_code: str = "",
+        username: str = "",
+        password: str = "",
+        email: str = "",
+        taxon_key: int | None = None,
+        dataset_key: str = "",
+        geometry: str = "",
+        basis_of_record: str = "",
         year_from: int | None = None,
         year_to: int | None = None,
         month_from: int = 1,
@@ -156,29 +358,59 @@ class GbifService:
         if not email.strip():
             raise ValueError("GBIF 계정 이메일을 입력하세요.")
 
-        match = cls.match_species(scientific_name)
-        taxon_key = match.get("usageKey")
-        if not taxon_key:
-            raise RuntimeError("GBIF에서 일치하는 taxonKey를 찾지 못했습니다.")
+        if taxon_key is None and scientific_name.strip():
+            match = cls.match_species(scientific_name)
+            taxon_key = match.get("usageKey")
+            if not taxon_key:
+                raise RuntimeError("GBIF에서 일치하는 taxonKey를 찾지 못했습니다.")
+        if taxon_key is None and not dataset_key.strip() and not country_code.strip() and not geometry.strip():
+            raise ValueError("학명/taxonKey, datasetKey, 국가코드, geometry 중 하나 이상을 입력하세요.")
 
         predicates = [
-            {
-                "type": "equals",
-                "key": "TAXON_KEY",
-                "value": str(taxon_key),
-            },
             {
                 "type": "equals",
                 "key": "HAS_COORDINATE",
                 "value": "true",
             },
         ]
+        if taxon_key is not None:
+            predicates.append(
+                {
+                    "type": "equals",
+                    "key": "TAXON_KEY",
+                    "value": str(taxon_key),
+                }
+            )
+        if dataset_key.strip():
+            predicates.append(
+                {
+                    "type": "equals",
+                    "key": "DATASET_KEY",
+                    "value": dataset_key.strip(),
+                }
+            )
         if country_code.strip():
             predicates.append(
                 {
                     "type": "equals",
                     "key": "COUNTRY",
                     "value": country_code.strip().upper(),
+                }
+            )
+        if geometry.strip():
+            predicates.append(
+                {
+                    "type": "within",
+                    "key": "GEOMETRY",
+                    "value": geometry.strip(),
+                }
+            )
+        if basis_of_record.strip():
+            predicates.append(
+                {
+                    "type": "equals",
+                    "key": "BASIS_OF_RECORD",
+                    "value": basis_of_record.strip().upper(),
                 }
             )
         if year_from is not None:
@@ -244,8 +476,17 @@ class GbifService:
     def _to_dataframe(records: list[dict]) -> pd.DataFrame:
         columns = [
             "gbifID",
+            "taxonKey",
+            "datasetKey",
             "scientificName",
             "acceptedScientificName",
+            "kingdom",
+            "phylum",
+            "class",
+            "order",
+            "family",
+            "genus",
+            "species",
             "decimalLatitude",
             "decimalLongitude",
             "year",
@@ -262,8 +503,17 @@ class GbifService:
             rows.append(
                 {
                     "gbifID": record.get("key", ""),
+                    "taxonKey": record.get("taxonKey", ""),
+                    "datasetKey": record.get("datasetKey", ""),
                     "scientificName": record.get("scientificName", ""),
                     "acceptedScientificName": record.get("acceptedScientificName", ""),
+                    "kingdom": record.get("kingdom", ""),
+                    "phylum": record.get("phylum", ""),
+                    "class": record.get("class", ""),
+                    "order": record.get("order", ""),
+                    "family": record.get("family", ""),
+                    "genus": record.get("genus", ""),
+                    "species": record.get("species", ""),
                     "decimalLatitude": record.get("decimalLatitude", ""),
                     "decimalLongitude": record.get("decimalLongitude", ""),
                     "year": record.get("year", ""),

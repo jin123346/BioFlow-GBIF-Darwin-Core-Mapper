@@ -1,5 +1,5 @@
 APP_NAME = "BioFlow"
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.0.1"
 APP_SUBTITLE = "Darwin Core Mapper"
 AUTHOR_NAME = "Jinhee Ha"
 AUTHOR_EMAIL = "hajhi789@gmail.com"

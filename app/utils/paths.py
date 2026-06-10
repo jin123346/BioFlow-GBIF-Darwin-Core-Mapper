@@ -16,7 +16,8 @@ RESOURCE_DIR = get_resource_dir()
 DATA_DIR = BASE_DIR / "data"
 OUTPUT_DIR = DATA_DIR / "output"
 MAPPING_DIR = DATA_DIR / "mapping_templates"
+CACHE_DIR = DATA_DIR / "cache"
 LOGO_PATH = RESOURCE_DIR / "bioflow_logo.png"
 
-for folder in [DATA_DIR, OUTPUT_DIR, MAPPING_DIR]:
+for folder in [DATA_DIR, OUTPUT_DIR, MAPPING_DIR, CACHE_DIR]:
     folder.mkdir(parents=True, exist_ok=True)

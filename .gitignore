@@ -26,6 +26,8 @@ dist/
 data/_*.csv
 data/_*.xlsx
 data/output/
+data/cache/
+gbif_analysis.xlsx
 output/
 exports/
 
