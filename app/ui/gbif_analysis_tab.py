@@ -3,8 +3,8 @@ import json
 
 import pandas as pd
 
-from PySide6.QtCore import QSettings, Qt, QTimer, QUrl
-from PySide6.QtGui import QDesktopServices
+from PySide6.QtCore import QSettings, Qt, QTimer, QUrl, Signal
+from PySide6.QtGui import QColor, QDesktopServices, QPainter, QPen, QStandardItem, QStandardItemModel
 from PySide6.QtWidgets import (
     QAbstractItemView,
     QApplication,
@@ -22,6 +22,7 @@ from PySide6.QtWidgets import (
     QMessageBox,
     QProgressDialog,
     QPushButton,
+    QScrollArea,
     QSpinBox,
     QTableWidget,
     QTableWidgetItem,
@@ -30,7 +31,8 @@ from PySide6.QtWidgets import (
 )
 
 from app.config.app_info import APP_NAME, AUTHOR_NAME
-from app.config.country_code import ISO_COUNTRY_CODES
+from app.config.country_code import GBIF_CONTINENT_OPTIONS, GBIF_COUNTRY_OPTIONS, ISO_COUNTRY_CODES
+from app.services.climate_service import ClimateService
 from app.services.gbif_service import GbifFetchCancelled, GbifOccurrenceCriteria, GbifService
 from app.utils.paths import OUTPUT_DIR
 
@@ -102,6 +104,259 @@ GBIF_GEOMETRY_HELP_TEXT = (
 )
 
 
+class CheckableComboBox(QComboBox):
+    selectionChanged = Signal()
+
+    def __init__(self, placeholder: str, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.placeholder = placeholder
+        self.setModel(QStandardItemModel(self))
+        self.setEditable(True)
+        self.lineEdit().setReadOnly(True)
+        self.lineEdit().setPlaceholderText(placeholder)
+        self.view().pressed.connect(self._toggle_item)
+        self.setMinimumWidth(190)
+        self._update_text()
+
+    def add_check_item(self, label: str, value: str) -> None:
+        item = QStandardItem(label)
+        item.setFlags(Qt.ItemIsEnabled | Qt.ItemIsUserCheckable)
+        item.setData(Qt.Unchecked, Qt.CheckStateRole)
+        item.setData(value, Qt.UserRole)
+        self.model().appendRow(item)
+        self._update_text()
+
+    def add_check_items(self, items: list[tuple[str, str]]) -> None:
+        for label, value in items:
+            self.add_check_item(label, value)
+
+    def selected_values(self) -> list[str]:
+        values = []
+        for row in range(self.model().rowCount()):
+            item = self.model().item(row)
+            if item.checkState() == Qt.Checked:
+                values.append(str(item.data(Qt.UserRole)))
+        return values
+
+    def clear_selection(self) -> None:
+        changed = False
+        for row in range(self.model().rowCount()):
+            item = self.model().item(row)
+            if item.checkState() == Qt.Checked:
+                item.setCheckState(Qt.Unchecked)
+                changed = True
+        self._update_text()
+        if changed:
+            self.selectionChanged.emit()
+
+    def clear_items(self) -> None:
+        self.model().clear()
+        self._update_text()
+
+    def _toggle_item(self, index) -> None:
+        item = self.model().itemFromIndex(index)
+        if item is None:
+            return
+        item.setCheckState(Qt.Unchecked if item.checkState() == Qt.Checked else Qt.Checked)
+        self._update_text()
+        self.selectionChanged.emit()
+
+    def _update_text(self) -> None:
+        labels = []
+        for row in range(self.model().rowCount()):
+            item = self.model().item(row)
+            if item.checkState() == Qt.Checked:
+                labels.append(item.text())
+        if not labels:
+            self.lineEdit().setText("")
+            return
+        text = labels[0] if len(labels) == 1 else f"{labels[0]} +{len(labels) - 1}"
+        self.lineEdit().setText(text)
+
+
+class GbifLiveChartWidget(QWidget):
+    def __init__(self, parent: QWidget | None = None):
+        super().__init__(parent)
+        self.chart_list: list[dict] = []
+        self.chart_type = "bar"
+        self.message = "GBIF 데이터를 가져오면 그래프가 표시됩니다."
+        self.colors = [
+            QColor("#0f766e"),
+            QColor("#2563eb"),
+            QColor("#b45309"),
+            QColor("#7c3aed"),
+            QColor("#be123c"),
+            QColor("#0891b2"),
+        ]
+        self.setMinimumHeight(260)
+
+    def clear_chart(self, message: str | None = None) -> None:
+        self.chart_list = []
+        self.setMinimumHeight(260)
+        self.message = message or "GBIF 데이터를 가져오면 그래프가 표시됩니다."
+        self.update()
+
+    def update_chart(self, chart_list: list[dict], chart_type: str) -> None:
+        self.chart_list = chart_list
+        self.chart_type = chart_type if chart_type in {"bar", "line"} else "bar"
+        self.setMinimumHeight(260 + max(0, min(len(chart_list), 3) - 1) * 180)
+        self.message = "현재 조건에 맞는 그래프 데이터가 없습니다."
+        self.update()
+
+    def paintEvent(self, event):
+        super().paintEvent(event)
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        rect = self.rect().adjusted(12, 12, -12, -12)
+        painter.fillRect(self.rect(), QColor("#ffffff"))
+
+        if not self.chart_list:
+            painter.setPen(QColor("#64748b"))
+            painter.drawText(rect, Qt.AlignCenter, self.message)
+            return
+
+        visible_charts = self.chart_list[:3]
+        chart_height = max(120, rect.height() // max(1, len(visible_charts)))
+        for index, chart in enumerate(visible_charts):
+            top = rect.top() + index * chart_height
+            bottom = rect.bottom() if index == len(visible_charts) - 1 else top + chart_height - 8
+            chart_rect = rect.adjusted(0, top - rect.top(), 0, bottom - rect.bottom())
+            self._draw_chart(painter, chart_rect, chart)
+
+    def _draw_chart(self, painter, rect, chart):
+        labels = [str(label) for label in chart.get("labels", [])]
+        series = chart.get("series", [])
+        if not labels or not series:
+            painter.setPen(QColor("#64748b"))
+            painter.drawText(rect, Qt.AlignCenter, self.message)
+            return
+
+        title_rect = rect.adjusted(0, 0, 0, -rect.height() + 26)
+        painter.setPen(QColor("#0f172a"))
+        title_font = painter.font()
+        title_font.setBold(True)
+        title_font.setPointSize(max(title_font.pointSize(), 10))
+        painter.setFont(title_font)
+        painter.drawText(title_rect, Qt.AlignLeft | Qt.AlignVCenter, str(chart.get("title", "Live chart")))
+
+        font = painter.font()
+        font.setBold(False)
+        font.setPointSize(9)
+        painter.setFont(font)
+
+        legend_height = self._draw_legend(painter, rect.adjusted(0, 28, 0, 0), series)
+        plot_rect = rect.adjusted(6, 38 + legend_height, -8, -24)
+        painter.setPen(QPen(QColor("#cbd5e1"), 1))
+        painter.drawLine(plot_rect.bottomLeft(), plot_rect.bottomRight())
+        painter.drawLine(plot_rect.bottomLeft(), plot_rect.topLeft())
+
+        values_by_series = [
+            [self._chart_number(value) for value in item.get("values", [])[: len(labels)]]
+            for item in series
+        ]
+        flat_values = [value for values in values_by_series for value in values]
+        min_value = min([0, *flat_values])
+        max_value = max([1, *flat_values])
+
+        if self.chart_type == "line":
+            self._draw_line_chart(painter, plot_rect, labels, series, values_by_series, min_value, max_value)
+        else:
+            self._draw_bar_chart(painter, plot_rect, labels, series, values_by_series, min_value, max_value)
+
+    def _draw_legend(self, painter, rect, series) -> int:
+        if len(series) <= 1:
+            return 0
+        x = rect.left()
+        y = rect.top()
+        row_height = 20
+        max_width = rect.width()
+        painter.setPen(QColor("#475569"))
+        for index, item in enumerate(series):
+            name = str(item.get("name", ""))[:42]
+            text_width = painter.fontMetrics().horizontalAdvance(name)
+            item_width = min(max(90, text_width + 24), 230)
+            if x + item_width > rect.left() + max_width:
+                x = rect.left()
+                y += row_height
+            color = self.colors[index % len(self.colors)]
+            painter.fillRect(x, y + 5, 10, 10, color)
+            painter.drawText(x + 16, y, item_width - 18, row_height, Qt.AlignVCenter | Qt.AlignLeft, name)
+            x += item_width + 10
+        return y - rect.top() + row_height + 4
+
+    def _draw_bar_chart(self, painter, plot_rect, labels, series, values_by_series, min_value, max_value):
+        group_count = len(labels)
+        series_count = max(1, len(series))
+        group_width = plot_rect.width() / max(1, group_count)
+        bar_width = max(3, min(28, (group_width - 8) / series_count))
+        value_range = max(max_value - min_value, 1)
+        baseline = plot_rect.bottom() - int(((0 - min_value) / value_range) * max(1, plot_rect.height() - 20))
+        painter.setPen(QPen(QColor("#e2e8f0"), 1))
+        painter.drawLine(plot_rect.left(), baseline, plot_rect.right(), baseline)
+
+        for label_index, label in enumerate(labels):
+            group_left = plot_rect.left() + label_index * group_width
+            for series_index, values in enumerate(values_by_series):
+                value = values[label_index] if label_index < len(values) else 0
+                value_y = plot_rect.bottom() - int(((value - min_value) / value_range) * max(1, plot_rect.height() - 20))
+                height = abs(value_y - baseline)
+                left = int(group_left + 4 + series_index * bar_width)
+                top = min(value_y, baseline)
+                painter.fillRect(left, top, int(bar_width - 2), height, self.colors[series_index % len(self.colors)])
+                if group_count <= 14 and value:
+                    painter.setPen(QColor("#334155"))
+                    painter.drawText(left - 8, top - 16, int(bar_width + 24), 14, Qt.AlignCenter, self._format_chart_value(value))
+
+            if group_count <= 18 or label_index % max(1, group_count // 12) == 0:
+                painter.setPen(QColor("#475569"))
+                painter.drawText(int(group_left), baseline + 4, int(group_width), 18, Qt.AlignCenter, label)
+
+    def _draw_line_chart(self, painter, plot_rect, labels, series, values_by_series, min_value, max_value):
+        point_count = len(labels)
+        if point_count == 1:
+            step = 0
+        else:
+            step = plot_rect.width() / (point_count - 1)
+        value_range = max(max_value - min_value, 1)
+
+        for series_index, values in enumerate(values_by_series):
+            color = self.colors[series_index % len(self.colors)]
+            painter.setPen(QPen(color, 2))
+            previous = None
+            for value_index, value in enumerate(values):
+                x = plot_rect.left() + value_index * step
+                y = plot_rect.bottom() - ((value - min_value) / value_range) * max(1, plot_rect.height() - 20)
+                if previous is not None:
+                    painter.drawLine(int(previous[0]), int(previous[1]), int(x), int(y))
+                painter.setBrush(QColor("#ffffff"))
+                painter.drawEllipse(int(x) - 3, int(y) - 3, 6, 6)
+                previous = (x, y)
+
+        painter.setPen(QColor("#475569"))
+        for label_index, label in enumerate(labels):
+            if point_count <= 18 or label_index % max(1, point_count // 12) == 0:
+                x = plot_rect.left() + label_index * step
+                painter.drawText(int(x) - 25, plot_rect.bottom() + 4, 50, 18, Qt.AlignCenter, label)
+
+    @staticmethod
+    def _format_chart_value(value: float) -> str:
+        return f"{int(value):,}" if float(value).is_integer() else f"{value:,.1f}"
+
+    @staticmethod
+    def _chart_number(value) -> float:
+        if value is None:
+            return 0.0
+        try:
+            if pd.isna(value):
+                return 0.0
+        except TypeError:
+            pass
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return 0.0
+
+
 class GbifAnalysisTab(QWidget):
     def __init__(self, settings: QSettings | None = None, parent: QWidget | None = None):
         super().__init__(parent)
@@ -109,6 +364,8 @@ class GbifAnalysisTab(QWidget):
         self.gbif_df = None
         self.gbif_raw_df = None
         self.gbif_filtered_df = None
+        self.gbif_climate_df = None
+        self.gbif_climate_location = None
         self.gbif_table_preview_df = None
         self.gbif_preview_loaded_rows = 0
         self.gbif_preview_chunk_size = 1000
@@ -116,10 +373,17 @@ class GbifAnalysisTab(QWidget):
         self.gbif_search_summary = None
         self.gbif_report_path = None
         self._building_gbif_basis_filter = False
+        self._syncing_gbif_quick_month = False
 
         root_layout = QVBoxLayout(self)
         root_layout.setContentsMargins(0, 0, 0, 0)
-        root_layout.addWidget(self._build_gbif_analysis_tab())
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setFrameShape(QFrame.NoFrame)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarAsNeeded)
+        scroll_area.setWidget(self._build_gbif_analysis_tab())
+        root_layout.addWidget(scroll_area)
 
         self.gbif_cleaning_timer = QTimer(self)
         self.gbif_cleaning_timer.setSingleShot(True)
@@ -204,10 +468,36 @@ class GbifAnalysisTab(QWidget):
         self.gbif_dataset_key_input.setPlaceholderText("데이터셋 조건: datasetKey")
         self.gbif_dataset_key_input.setFixedWidth(210)
 
-        self.gbif_country_input = QLineEdit()
-        self.gbif_country_input.setPlaceholderText("국가코드")
-        self.gbif_country_input.setMaxLength(2)
-        self.gbif_country_input.setFixedWidth(82)
+        self.gbif_country_combo = CheckableComboBox("Country")
+        self.gbif_country_combo.add_check_items(
+            [(f"{name} ({code})", code) for code, name in GBIF_COUNTRY_OPTIONS]
+        )
+        self.gbif_country_combo.setFixedWidth(230)
+
+        self.gbif_continent_combo = CheckableComboBox("Continent")
+        self.gbif_continent_combo.add_check_items(
+            [(name, code) for code, name in GBIF_CONTINENT_OPTIONS]
+        )
+        self.gbif_continent_combo.setFixedWidth(170)
+        self.gbif_country_combo.setMaxVisibleItems(18)
+        self.gbif_country_combo.setFixedWidth(230)
+
+        self.gbif_filter_country_combo = CheckableComboBox("Filter Country")
+        self.gbif_filter_country_combo.add_check_items(
+            [(f"{name} ({code})", code) for code, name in GBIF_COUNTRY_OPTIONS]
+        )
+        self.gbif_filter_country_combo.setFixedWidth(230)
+        self.gbif_filter_country_combo.setMaxVisibleItems(18)
+
+        self.gbif_filter_continent_combo = CheckableComboBox("Filter Continent")
+        self.gbif_filter_continent_combo.add_check_items(
+            [(name, code) for code, name in GBIF_CONTINENT_OPTIONS]
+        )
+        self.gbif_filter_continent_combo.setFixedWidth(170)
+
+        self.gbif_filter_species_combo = CheckableComboBox("Filter Species")
+        self.gbif_filter_species_combo.setFixedWidth(280)
+        self.gbif_filter_species_combo.setMaxVisibleItems(18)
 
         self.gbif_geometry_input = QLineEdit()
         self.gbif_geometry_input.setPlaceholderText("지역 조건: 서울, 부산, jeju 또는 bbox W,S,E,N")
@@ -237,6 +527,14 @@ class GbifAnalysisTab(QWidget):
         self.gbif_chart_type_combo.addItem("막대 그래프", "bar")
         self.gbif_chart_type_combo.addItem("선 그래프", "line")
         self.gbif_chart_type_combo.setFixedWidth(120)
+        self.gbif_chart_type_combo.currentIndexChanged.connect(self.update_gbif_live_chart)
+
+        self.gbif_fill_missing_periods_check = QCheckBox("빈 기간 0 채움")
+        self.gbif_fill_missing_periods_check.setChecked(True)
+        self.gbif_fill_missing_periods_check.stateChanged.connect(self.update_gbif_live_chart)
+
+        self.gbif_cumulative_check = QCheckBox("누적")
+        self.gbif_cumulative_check.stateChanged.connect(self.update_gbif_live_chart)
 
         self.gbif_period_combo = QComboBox()
         self.gbif_period_combo.addItem("종합", "summary")
@@ -248,6 +546,13 @@ class GbifAnalysisTab(QWidget):
         self.gbif_period_combo.addItem("자료유형별 기록 수", "basis")
         self.gbif_period_combo.setFixedWidth(130)
         self.gbif_period_combo.currentIndexChanged.connect(self.update_gbif_period_controls)
+
+        self.gbif_quick_month_combo = QComboBox()
+        self.gbif_quick_month_combo.addItem("전체 월", 0)
+        for month in range(1, 13):
+            self.gbif_quick_month_combo.addItem(f"{month}월", month)
+        self.gbif_quick_month_combo.setFixedWidth(100)
+        self.gbif_quick_month_combo.currentIndexChanged.connect(self.apply_gbif_quick_month_filter)
 
         self.gbif_year_from_input = QSpinBox()
         self.gbif_year_from_input.setRange(0, 9999)
@@ -299,6 +604,16 @@ class GbifAnalysisTab(QWidget):
         self.btn_export_gbif_excel.clicked.connect(self.export_gbif_analysis_excel)
         self.btn_export_gbif_excel.setEnabled(False)
 
+        self.btn_export_gbif_timeseries_csv = QPushButton("Tableau 데이터")
+        self.btn_export_gbif_timeseries_csv.setProperty("role", "secondary")
+        self.btn_export_gbif_timeseries_csv.clicked.connect(self.export_gbif_timeseries_csv)
+        self.btn_export_gbif_timeseries_csv.setEnabled(False)
+
+        self.btn_fetch_gbif_climate = QPushButton("기후 데이터")
+        self.btn_fetch_gbif_climate.setProperty("role", "secondary")
+        self.btn_fetch_gbif_climate.clicked.connect(self.fetch_gbif_climate_data)
+        self.btn_fetch_gbif_climate.setEnabled(False)
+
         self.btn_export_gbif_geojson = QPushButton("QGIS 저장")
         self.btn_export_gbif_geojson.setProperty("role", "secondary")
         self.btn_export_gbif_geojson.clicked.connect(self.export_gbif_analysis_geojson)
@@ -307,7 +622,8 @@ class GbifAnalysisTab(QWidget):
         input_layout.addWidget(self.gbif_species_input, 1)
         input_layout.addWidget(self.gbif_taxon_key_input)
         input_layout.addWidget(self.gbif_dataset_key_input)
-        input_layout.addWidget(self.gbif_country_input)
+        input_layout.addWidget(self.gbif_country_combo)
+        input_layout.addWidget(self.gbif_continent_combo)
         input_layout.addWidget(self.gbif_geometry_input, 1)
         input_layout.addWidget(geometry_help_icon)
         input_layout.addWidget(self.gbif_use_cache_check)
@@ -328,10 +644,16 @@ class GbifAnalysisTab(QWidget):
         analysis_layout.addWidget(QLabel("그래프 기준"))
         analysis_layout.addWidget(self.gbif_period_combo)
         analysis_layout.addWidget(self.gbif_chart_type_combo)
+        analysis_layout.addWidget(self.gbif_fill_missing_periods_check)
+        analysis_layout.addWidget(self.gbif_cumulative_check)
+        analysis_layout.addWidget(QLabel("월 보기"))
+        analysis_layout.addWidget(self.gbif_quick_month_combo)
         analysis_layout.addWidget(self.btn_draw_gbif_graph)
         analysis_layout.addWidget(self.btn_open_gbif_report)
         analysis_layout.addWidget(self.btn_export_gbif_csv)
         analysis_layout.addWidget(self.btn_export_gbif_excel)
+        analysis_layout.addWidget(self.btn_export_gbif_timeseries_csv)
+        analysis_layout.addWidget(self.btn_fetch_gbif_climate)
         analysis_layout.addWidget(self.btn_export_gbif_geojson)
         analysis_layout.addStretch()
         search_layout.addLayout(analysis_layout)
@@ -353,6 +675,13 @@ class GbifAnalysisTab(QWidget):
         filter_layout.addWidget(self.gbif_month_from_input)
         filter_layout.addWidget(QLabel("~"))
         filter_layout.addWidget(self.gbif_month_to_input)
+        filter_layout.addSpacing(14)
+        filter_layout.addWidget(QLabel("Country"))
+        filter_layout.addWidget(self.gbif_filter_country_combo)
+        filter_layout.addWidget(QLabel("Continent"))
+        filter_layout.addWidget(self.gbif_filter_continent_combo)
+        filter_layout.addWidget(QLabel("Species"))
+        filter_layout.addWidget(self.gbif_filter_species_combo)
         filter_layout.addStretch()
         cleaning_layout.addLayout(filter_layout)
 
@@ -442,10 +771,17 @@ class GbifAnalysisTab(QWidget):
         self.gbif_summary_label.setObjectName("metaValue")
         self.gbif_summary_label.setWordWrap(True)
         search_layout.addWidget(self.gbif_summary_label)
+        self.gbif_climate_label = QLabel("기후 데이터가 아직 연결되지 않았습니다.")
+        self.gbif_climate_label.setObjectName("metaValue")
+        self.gbif_climate_label.setWordWrap(True)
+        search_layout.addWidget(self.gbif_climate_label)
+        self.gbif_live_chart = GbifLiveChartWidget()
+        search_layout.addWidget(self.gbif_live_chart)
         layout.addWidget(search_card)
         self._connect_gbif_cleaning_signals()
 
         self.gbif_result_table = QTableWidget()
+        self.gbif_result_table.setMinimumHeight(320)
         self._configure_table(self.gbif_result_table)
         self.gbif_result_table.setEditTriggers(QAbstractItemView.NoEditTriggers)
         self.gbif_result_table.verticalHeader().setVisible(True)
@@ -473,18 +809,21 @@ class GbifAnalysisTab(QWidget):
         scientific_name = self.gbif_species_input.text().strip()
         dataset_key = self.gbif_dataset_key_input.text().strip()
         geometry = self._normalize_gbif_geometry(self.gbif_geometry_input.text().strip())
-        country_code = self.gbif_country_input.text().strip().upper()
+        country_codes = self.gbif_country_combo.selected_values()
+        continent_codes = self.gbif_continent_combo.selected_values()
 
-        if country_code and not self.validate_country_code(country_code):
+        invalid_country_codes = [code for code in country_codes if not self.validate_country_code(code)]
+        if invalid_country_codes:
             raise ValueError("국가코드는 KR, JP, US처럼 2자리 영문으로 입력하세요.")
-        if taxon_key is None and not scientific_name and not dataset_key and not country_code and not geometry:
+        if taxon_key is None and not scientific_name and not dataset_key and not country_codes and not continent_codes and not geometry:
             raise ValueError("분류군, datasetKey, 국가코드, geometry 중 하나 이상을 입력하세요.")
 
         return GbifOccurrenceCriteria(
             scientific_name=scientific_name,
             taxon_key=taxon_key,
             dataset_key=dataset_key,
-            country_code=country_code,
+            country_codes=country_codes,
+            continent_codes=continent_codes,
             geometry=geometry,
             limit=100000,
         )
@@ -531,6 +870,19 @@ class GbifAnalysisTab(QWidget):
             f"{west} {south}, {east} {south}, {east} {north}, {west} {north}, {west} {south}"
             "))"
         )
+
+    @staticmethod
+    def _format_selected_codes(values: list[str]) -> str:
+        return ", ".join(values) if values else "ALL"
+
+    @staticmethod
+    def _refined_gbif_codes(search_codes: list[str], filter_codes: list[str]) -> list[str]:
+        if not filter_codes:
+            return search_codes
+        if not search_codes:
+            return filter_codes
+        search_set = {code.upper() for code in search_codes}
+        return [code for code in filter_codes if code.upper() in search_set]
 
     def _fetch_gbif_analysis(self, use_cache: bool):
         try:
@@ -582,7 +934,8 @@ class GbifAnalysisTab(QWidget):
                 "status": result.status,
                 "totalRecords": result.total_records,
                 "shownRecords": len(result.dataframe),
-                "countryCode": criteria.country_code or "ALL",
+                "countryCode": self._format_selected_codes(criteria.country_codes),
+                "continent": self._format_selected_codes(criteria.continent_codes),
                 "datasetKey": criteria.dataset_key or "ALL",
                 "geometry": criteria.geometry or "ALL",
                 "basisOfRecord": "ALL",
@@ -591,6 +944,7 @@ class GbifAnalysisTab(QWidget):
             self.gbif_df = self.gbif_raw_df
             self.update_gbif_year_range(self.gbif_raw_df)
             self.build_gbif_basis_filter(self.gbif_raw_df)
+            self.build_gbif_species_filter(self.gbif_raw_df)
             self.update_gbif_filtered_df(show_table=True)
             has_data = self.gbif_raw_df is not None and not self.gbif_raw_df.empty
             self.set_gbif_analysis_buttons_enabled(has_data)
@@ -600,7 +954,8 @@ class GbifAnalysisTab(QWidget):
             cache_text = "캐시" if result.from_cache else "GBIF API"
             self.gbif_summary_label.setText(
                 f"일치 이름: {result.matched_name} / taxonKey: {result.taxon_key} / "
-                f"datasetKey: {criteria.dataset_key or 'ALL'} / 국가: {criteria.country_code or 'ALL'} / "
+                f"datasetKey: {criteria.dataset_key or 'ALL'} / 국가: {self._format_selected_codes(criteria.country_codes)} / "
+                f"대륙: {self._format_selected_codes(criteria.continent_codes)} / "
                 f"전체 좌표 기록: {result.total_records:,}건 / 가져옴: {len(result.dataframe):,}건 / "
                 f"정제 후: {len(self.gbif_filtered_df):,}건 / 출처: {cache_text}"
                 f"{limit_note}"
@@ -630,6 +985,8 @@ class GbifAnalysisTab(QWidget):
             self.gbif_raw_df = None
             self.gbif_df = None
         self.gbif_filtered_df = None
+        self.gbif_climate_df = None
+        self.gbif_climate_location = None
         self.gbif_report_path = None
         self.gbif_table_preview_df = None
         self.gbif_preview_loaded_rows = 0
@@ -637,8 +994,13 @@ class GbifAnalysisTab(QWidget):
         self.gbif_result_table.clear()
         self.gbif_result_table.setRowCount(0)
         self.gbif_result_table.setColumnCount(0)
+        if hasattr(self, "gbif_live_chart"):
+            self.gbif_live_chart.clear_chart()
+        if hasattr(self, "gbif_climate_label"):
+            self.gbif_climate_label.setText("기후 데이터가 아직 연결되지 않았습니다.")
         self.gbif_filtered_count_label.setText("정제 조건에 해당하는 데이터: 0건")
         self.clear_gbif_basis_filter()
+        self.clear_gbif_species_filter()
         self.set_gbif_analysis_buttons_enabled(False)
 
     def reset_gbif_cleaning_controls(self):
@@ -650,6 +1012,12 @@ class GbifAnalysisTab(QWidget):
             self.gbif_year_to_input.setValue(0)
             self.gbif_month_from_input.setValue(1)
             self.gbif_month_to_input.setValue(12)
+            self._sync_gbif_quick_month_combo()
+            self.gbif_filter_country_combo.clear_selection()
+            self.gbif_filter_continent_combo.clear_selection()
+            self.gbif_filter_species_combo.clear_selection()
+            self.gbif_fill_missing_periods_check.setChecked(True)
+            self.gbif_cumulative_check.setChecked(False)
             self.gbif_remove_missing_year_check.setChecked(True)
             self.gbif_remove_missing_month_check.setChecked(False)
             self.gbif_remove_missing_name_check.setChecked(True)
@@ -659,12 +1027,50 @@ class GbifAnalysisTab(QWidget):
         finally:
             self._building_gbif_basis_filter = False
 
+    def apply_gbif_quick_month_filter(self, *_):
+        if getattr(self, "_syncing_gbif_quick_month", False):
+            return
+        month = int(self.gbif_quick_month_combo.currentData() or 0)
+        self._syncing_gbif_quick_month = True
+        try:
+            if month:
+                self.gbif_month_from_input.setValue(month)
+                self.gbif_month_to_input.setValue(month)
+            else:
+                self.gbif_month_from_input.setValue(1)
+                self.gbif_month_to_input.setValue(12)
+        finally:
+            self._syncing_gbif_quick_month = False
+        if self.gbif_raw_df is None:
+            self.auto_apply_gbif_cleaning()
+            return
+        self.gbif_cleaning_timer.stop()
+        self.update_gbif_filtered_df(show_table=True)
+
+    def _sync_gbif_quick_month_combo(self):
+        if not hasattr(self, "gbif_quick_month_combo"):
+            return
+        month_from = self.gbif_month_from_input.value()
+        month_to = self.gbif_month_to_input.value()
+        month = month_from if month_from == month_to else 0
+        if month_from == 1 and month_to == 12:
+            month = 0
+        self._syncing_gbif_quick_month = True
+        try:
+            index = self.gbif_quick_month_combo.findData(month)
+            if index >= 0:
+                self.gbif_quick_month_combo.setCurrentIndex(index)
+        finally:
+            self._syncing_gbif_quick_month = False
+
     def set_gbif_analysis_buttons_enabled(self, enabled: bool):
         self.btn_draw_gbif_graph.setEnabled(enabled)
         self.btn_apply_gbif_cleaning.setEnabled(enabled)
         self.btn_open_gbif_report.setEnabled(enabled)
         self.btn_export_gbif_csv.setEnabled(enabled)
         self.btn_export_gbif_excel.setEnabled(enabled)
+        self.btn_export_gbif_timeseries_csv.setEnabled(enabled)
+        self.btn_fetch_gbif_climate.setEnabled(enabled)
         self.btn_export_gbif_geojson.setEnabled(enabled)
 
     def _connect_gbif_cleaning_signals(self):
@@ -675,6 +1081,10 @@ class GbifAnalysisTab(QWidget):
             self.gbif_month_to_input,
         ]:
             widget.valueChanged.connect(self.auto_apply_gbif_cleaning)
+
+        self.gbif_filter_country_combo.selectionChanged.connect(self.auto_apply_gbif_cleaning)
+        self.gbif_filter_continent_combo.selectionChanged.connect(self.auto_apply_gbif_cleaning)
+        self.gbif_filter_species_combo.selectionChanged.connect(self.auto_apply_gbif_cleaning)
 
         for widget in [
             self.gbif_remove_missing_year_check,
@@ -690,6 +1100,8 @@ class GbifAnalysisTab(QWidget):
     def auto_apply_gbif_cleaning(self, *_):
         if getattr(self, "_building_gbif_basis_filter", False):
             return
+        if not getattr(self, "_syncing_gbif_quick_month", False):
+            self._sync_gbif_quick_month_combo()
         if self.gbif_raw_df is None:
             return
         self.gbif_filtered_count_label.setText("정제 조건 변경 감지: 잠시 후 적용됩니다...")
@@ -747,6 +1159,27 @@ class GbifAnalysisTab(QWidget):
         finally:
             self._building_gbif_basis_filter = False
 
+    def clear_gbif_species_filter(self):
+        if not hasattr(self, "gbif_filter_species_combo"):
+            return
+        self.gbif_filter_species_combo.clear_items()
+
+    def build_gbif_species_filter(self, df: pd.DataFrame):
+        if not hasattr(self, "gbif_filter_species_combo"):
+            return
+        self._building_gbif_basis_filter = True
+        try:
+            self.gbif_filter_species_combo.clear_items()
+            species_values = self._gbif_species_values(df)
+            if species_values.empty:
+                return
+            counts = species_values.value_counts().sort_index()
+            for species_name, count in counts.items():
+                label = f"{species_name[:80]}    {int(count):,}"
+                self.gbif_filter_species_combo.add_check_item(label, species_name)
+        finally:
+            self._building_gbif_basis_filter = False
+
     @staticmethod
     def _format_basis_label(value: str) -> str:
         if value == "UNKNOWN":
@@ -762,12 +1195,112 @@ class GbifAnalysisTab(QWidget):
             if checkbox.isChecked()
         }
 
+    def selected_gbif_species_values(self) -> list[str]:
+        if not hasattr(self, "gbif_filter_species_combo"):
+            return []
+        return self.gbif_filter_species_combo.selected_values()
+
+    def current_gbif_time_series_options(self) -> tuple[bool, bool]:
+        fill_missing = (
+            hasattr(self, "gbif_fill_missing_periods_check")
+            and self.gbif_fill_missing_periods_check.isChecked()
+        )
+        cumulative = hasattr(self, "gbif_cumulative_check") and self.gbif_cumulative_check.isChecked()
+        return fill_missing, cumulative
+
+    @staticmethod
+    def _gbif_climate_charts(
+        climate_df: pd.DataFrame | None,
+        year_from: int | None,
+        year_to: int | None,
+        month_from: int,
+        month_to: int,
+    ) -> list[dict]:
+        if climate_df is None or climate_df.empty:
+            return []
+        df = climate_df.copy()
+        if year_from is not None:
+            df = df.loc[df["year"].ge(year_from)]
+        if year_to is not None:
+            df = df.loc[df["year"].le(year_to)]
+        df = df.loc[df["month"].ge(month_from) & df["month"].le(month_to)]
+        if df.empty:
+            return []
+        labels = [f"{int(row.year)}-{int(row.month):02d}" for row in df.itertuples()]
+        charts = []
+        if "temperatureC" in df.columns:
+            charts.append(
+                {
+                    "title": "월별 평균기온 (NASA POWER, C)",
+                    "labels": labels,
+                    "series": [
+                        {
+                            "name": "temperatureC",
+                            "values": [round(float(value), 2) if pd.notna(value) else 0 for value in df["temperatureC"]],
+                        }
+                    ],
+                }
+            )
+        if "precipitationTotalMm" in df.columns:
+            charts.append(
+                {
+                    "title": "월별 총강수량 (NASA POWER, mm)",
+                    "labels": labels,
+                    "series": [
+                        {
+                            "name": "precipitationTotalMm",
+                            "values": [
+                                round(float(value), 2) if pd.notna(value) else 0 for value in df["precipitationTotalMm"]
+                            ],
+                        }
+                    ],
+                }
+            )
+        return charts
+
     def update_gbif_filtered_df(self, show_table: bool = True):
         self.gbif_filtered_df = self.get_current_gbif_analysis_df()
         if show_table:
             self.show_gbif_results(self.gbif_filtered_df)
         self.update_gbif_filtered_count_label()
+        self.update_gbif_live_chart()
         self.gbif_report_path = None
+
+    def update_gbif_live_chart(self, *_):
+        if not hasattr(self, "gbif_live_chart"):
+            return
+        if self.gbif_filtered_df is None or self.gbif_filtered_df.empty:
+            self.gbif_live_chart.clear_chart("현재 조건에 맞는 데이터가 없습니다.")
+            return
+        try:
+            year_from, year_to, month_from, month_to = self.get_gbif_filter_ranges()
+            fill_missing, cumulative = self.current_gbif_time_series_options()
+            chart_list = self._gbif_temporal_charts(
+                self.gbif_filtered_df,
+                self.gbif_period_combo.currentData() or "summary",
+                year_from,
+                year_to,
+                month_from,
+                month_to,
+                self.selected_gbif_species_values(),
+                fill_missing,
+                cumulative,
+            )
+            climate_charts = self._gbif_climate_charts(
+                self.gbif_climate_df,
+                year_from,
+                year_to,
+                month_from,
+                month_to,
+            )
+            if climate_charts:
+                chart_list = chart_list[:1] + climate_charts
+            self.gbif_live_chart.update_chart(
+                chart_list,
+                self.gbif_chart_type_combo.currentData() or "bar",
+            )
+        except Exception as e:
+            self.gbif_live_chart.clear_chart(str(e))
 
     def update_gbif_filtered_count_label(self):
         raw_count = 0 if self.gbif_raw_df is None else len(self.gbif_raw_df)
@@ -778,6 +1311,67 @@ class GbifAnalysisTab(QWidget):
             f"정제 조건에 해당하는 데이터: {filtered_count:,}건 / 원본 {raw_count:,}건 / "
             f"테이블 미리보기: {preview_count:,}건"
         )
+
+    def fetch_gbif_climate_data(self):
+        if self.gbif_filtered_df is None:
+            self.update_gbif_filtered_df(show_table=False)
+        if self.gbif_filtered_df is None or self.gbif_filtered_df.empty:
+            QMessageBox.warning(self, "GBIF 기후 데이터", "현재 정제/필터 조건에 맞는 GBIF 데이터가 없습니다.")
+            return
+
+        try:
+            latitude, longitude = self._gbif_filtered_coordinate_center(self.gbif_filtered_df)
+            start_year, end_year = self._gbif_climate_year_range(self.gbif_filtered_df)
+        except ValueError as e:
+            QMessageBox.warning(self, "GBIF 기후 데이터", str(e))
+            return
+
+        self.btn_fetch_gbif_climate.setEnabled(False)
+        self.btn_fetch_gbif_climate.setText("기후 조회 중...")
+        try:
+            result = ClimateService.fetch_monthly_power(
+                latitude=latitude,
+                longitude=longitude,
+                start_year=start_year,
+                end_year=end_year,
+                use_cache=self.gbif_use_cache_check.isChecked(),
+            )
+            self.gbif_climate_df = result.dataframe
+            self.gbif_climate_location = {
+                "latitude": result.latitude,
+                "longitude": result.longitude,
+                "source": result.source,
+                "fromCache": result.from_cache,
+            }
+            source_text = "캐시" if result.from_cache else result.source
+            self.gbif_climate_label.setText(
+                f"기후 데이터: {result.source} / 중심 좌표 {result.latitude:.4f}, {result.longitude:.4f} / "
+                f"{result.start_year}-{result.end_year} / {len(result.dataframe):,}개월 / 출처: {source_text}"
+            )
+            self.update_gbif_live_chart()
+        except Exception as e:
+            QMessageBox.critical(self, "GBIF 기후 데이터 오류", f"기후 데이터를 가져오는 중 오류가 발생했습니다.\n\n{e}")
+        finally:
+            self.btn_fetch_gbif_climate.setEnabled(self.gbif_raw_df is not None and not self.gbif_raw_df.empty)
+            self.btn_fetch_gbif_climate.setText("기후 데이터")
+
+    @staticmethod
+    def _gbif_filtered_coordinate_center(df: pd.DataFrame) -> tuple[float, float]:
+        if "decimalLatitude" not in df.columns or "decimalLongitude" not in df.columns:
+            raise ValueError("기후 데이터를 가져오려면 decimalLatitude/decimalLongitude 컬럼이 필요합니다.")
+        latitudes = pd.to_numeric(df["decimalLatitude"], errors="coerce")
+        longitudes = pd.to_numeric(df["decimalLongitude"], errors="coerce")
+        valid_mask = latitudes.notna() & longitudes.notna()
+        if not valid_mask.any():
+            raise ValueError("기후 데이터를 가져올 수 있는 유효한 좌표가 없습니다.")
+        return float(latitudes.loc[valid_mask].mean()), float(longitudes.loc[valid_mask].mean())
+
+    @staticmethod
+    def _gbif_climate_year_range(df: pd.DataFrame) -> tuple[int, int]:
+        years = GbifAnalysisTab._gbif_year_values(df)
+        if years.empty:
+            raise ValueError("기후 데이터를 가져오려면 year 값이 필요합니다.")
+        return int(years.min()), int(years.max())
 
     def draw_gbif_graph_report(self):
         if self.gbif_raw_df is None or self.gbif_filtered_df is None or self.gbif_filtered_df.empty:
@@ -809,11 +1403,20 @@ class GbifAnalysisTab(QWidget):
         self.btn_request_gbif_download.setText("요청 중...")
         try:
             year_from, year_to, month_from, month_to = self.get_gbif_filter_ranges()
+            selected_country_codes = self.gbif_filter_country_combo.selected_values()
+            selected_continent_codes = self.gbif_filter_continent_combo.selected_values()
+            country_codes = self._refined_gbif_codes(criteria.country_codes, selected_country_codes)
+            continent_codes = self._refined_gbif_codes(criteria.continent_codes, selected_continent_codes)
+            if selected_country_codes and not country_codes:
+                raise ValueError("Search country and filter country do not overlap.")
+            if selected_continent_codes and not continent_codes:
+                raise ValueError("Search continent and filter continent do not overlap.")
             result = GbifService.request_occurrence_download(
                 scientific_name=criteria.scientific_name,
                 taxon_key=criteria.taxon_key,
                 dataset_key=criteria.dataset_key,
-                country_code=criteria.country_code,
+                country_codes=country_codes,
+                continent_codes=continent_codes,
                 geometry=criteria.geometry,
                 username=username,
                 password=password,
@@ -874,6 +1477,8 @@ class GbifAnalysisTab(QWidget):
             year_to,
             month_from,
             month_to,
+            self.gbif_filter_country_combo.selected_values(),
+            self.gbif_filter_continent_combo.selected_values(),
         )
         return self._apply_gbif_cleaning_options(filtered_df)
 
@@ -905,6 +1510,11 @@ class GbifAnalysisTab(QWidget):
                 .replace("", "UNKNOWN")
             )
             cleaned_df = cleaned_df.loc[basis_values.isin(selected_basis)]
+
+        selected_species = self.selected_gbif_species_values()
+        if selected_species:
+            species_values = self._gbif_species_values(cleaned_df).reindex(cleaned_df.index)
+            cleaned_df = cleaned_df.loc[species_values.isin(selected_species)]
 
         cleaned_df = self._exclude_gbif_keywords(
             cleaned_df,
@@ -1007,6 +1617,7 @@ class GbifAnalysisTab(QWidget):
     def update_gbif_period_controls(self, *_):
         for widget in (self.gbif_year_from_input, self.gbif_year_to_input):
             widget.setEnabled(True)
+        self.update_gbif_live_chart()
 
     def get_gbif_filter_ranges(self) -> tuple[int | None, int | None, int, int]:
         year_from = self.gbif_year_from_input.value() if self.gbif_year_from_input.isEnabled() else 0
@@ -1045,6 +1656,7 @@ class GbifAnalysisTab(QWidget):
         chart_type = self.gbif_chart_type_combo.currentData() or "bar"
         period_type = self.gbif_period_combo.currentData() or "summary"
         year_from, year_to, month_from, month_to = self.get_gbif_filter_ranges()
+        fill_missing, cumulative = self.current_gbif_time_series_options()
         report_path.write_text(
             self._gbif_analysis_report_html(
                 self.gbif_filtered_df,
@@ -1055,6 +1667,9 @@ class GbifAnalysisTab(QWidget):
                 year_to,
                 month_from,
                 month_to,
+                self.selected_gbif_species_values(),
+                fill_missing,
+                cumulative,
             ),
             encoding="utf-8",
         )
@@ -1105,6 +1720,7 @@ class GbifAnalysisTab(QWidget):
             chart_type = self.gbif_chart_type_combo.currentData() or "bar"
             period_type = self.gbif_period_combo.currentData() or "summary"
             year_from, year_to, month_from, month_to = self.get_gbif_filter_ranges()
+            fill_missing, cumulative = self.current_gbif_time_series_options()
             filtered_df = self.gbif_filtered_df if self.gbif_filtered_df is not None else self.get_current_gbif_analysis_df()
             if filtered_df.empty:
                 QMessageBox.warning(self, "GBIF 분석", "현재 정제/필터 조건에 맞는 데이터가 없습니다.")
@@ -1116,6 +1732,9 @@ class GbifAnalysisTab(QWidget):
                 year_to,
                 month_from,
                 month_to,
+                self.selected_gbif_species_values(),
+                fill_missing,
+                cumulative,
             )
             self._write_gbif_analysis_workbook(
                 file_path,
@@ -1138,6 +1757,202 @@ class GbifAnalysisTab(QWidget):
             )
         except Exception as e:
             QMessageBox.critical(self, "오류", f"GBIF 분석 엑셀 저장 중 오류가 발생했습니다.\n\n{e}")
+
+    def export_gbif_timeseries_csv(self):
+        if self.gbif_raw_df is None or self.gbif_raw_df.empty:
+            QMessageBox.warning(self, "GBIF 분석", "저장할 GBIF 데이터가 없습니다.")
+            return
+
+        file_path, _ = QFileDialog.getSaveFileName(
+            self,
+            "GBIF Tableau 데이터 저장",
+            str(Path(self._get_last_save_dir()) / "gbif_tableau_timeseries.xlsx"),
+            "Excel Files (*.xlsx);;JSON Files (*.json);;CSV Files (*.csv)",
+        )
+        if not file_path:
+            return
+
+        try:
+            filtered_df = self.gbif_filtered_df if self.gbif_filtered_df is not None else self.get_current_gbif_analysis_df()
+            if filtered_df.empty:
+                QMessageBox.warning(self, "GBIF 분석", "현재 정제/필터 조건에 맞는 데이터가 없습니다.")
+                return
+            year_from, year_to, month_from, month_to = self.get_gbif_filter_ranges()
+            fill_missing, cumulative = self.current_gbif_time_series_options()
+            tableau_df = self._gbif_tableau_timeseries_dataframe(
+                filtered_df,
+                year_from,
+                year_to,
+                month_from,
+                month_to,
+                self.selected_gbif_species_values(),
+                fill_missing,
+                self.gbif_climate_df,
+            )
+            if file_path.lower().endswith(".xlsx"):
+                tableau_df.to_excel(file_path, index=False)
+            elif file_path.lower().endswith(".json"):
+                Path(file_path).write_text(
+                    tableau_df.to_json(orient="records", force_ascii=False, indent=2),
+                    encoding="utf-8",
+                )
+            else:
+                if not file_path.lower().endswith(".csv"):
+                    file_path += ".xlsx"
+                    tableau_df.to_excel(file_path, index=False)
+                    self._remember_save_dir(file_path)
+                    QMessageBox.information(self, "저장 완료", f"Tableau용 GBIF 시계열 데이터를 저장했습니다.\n\n{file_path}")
+                    return
+                tableau_df.to_csv(file_path, index=False, encoding="utf-8-sig")
+            self._remember_save_dir(file_path)
+            QMessageBox.information(self, "저장 완료", f"Tableau용 GBIF 시계열 데이터를 저장했습니다.\n\n{file_path}")
+            return
+            chart_list = self._gbif_temporal_charts(
+                filtered_df,
+                self.gbif_period_combo.currentData() or "summary",
+                year_from,
+                year_to,
+                month_from,
+                month_to,
+                self.selected_gbif_species_values(),
+                fill_missing,
+                cumulative,
+            )
+            chart_list = chart_list + self._gbif_climate_charts(
+                self.gbif_climate_df,
+                year_from,
+                year_to,
+                month_from,
+                month_to,
+            )
+            rows = []
+            for chart in chart_list:
+                labels = chart.get("labels", [])
+                for series in chart.get("series", []):
+                    values = series.get("values", [])
+                    for label, value in zip(labels, values):
+                        series_name = str(series.get("name", ""))
+                        rows.append(
+                            {
+                                "chart": chart.get("title", ""),
+                                "series": series_name,
+                                "period": label,
+                                "count": "" if series_name in {"temperatureC", "precipitationMm"} else int(value or 0),
+                                "temperatureC": value if series_name == "temperatureC" else "",
+                                "precipitationMm": value if series_name == "precipitationMm" else "",
+                                "value": value,
+                            }
+                        )
+            pd.DataFrame(rows).to_csv(file_path, index=False, encoding="utf-8-sig")
+            self._remember_save_dir(file_path)
+            QMessageBox.information(self, "저장 완료", f"GBIF 시계열 데이터를 저장했습니다.\n\n{file_path}")
+        except Exception as e:
+            QMessageBox.critical(self, "오류", f"GBIF 시계열 CSV 저장 중 오류가 발생했습니다.\n\n{e}")
+
+    def _gbif_tableau_timeseries_dataframe(
+        self,
+        df: pd.DataFrame,
+        year_from: int | None,
+        year_to: int | None,
+        month_from: int,
+        month_to: int,
+        selected_species: list[str],
+        fill_missing: bool,
+        climate_df: pd.DataFrame | None,
+    ) -> pd.DataFrame:
+        working_df = df.copy()
+        year_values = self._gbif_year_values(working_df).reindex(working_df.index)
+        month_values = self._gbif_month_values(working_df).reindex(working_df.index)
+        valid_mask = year_values.notna() & month_values.notna()
+        working_df = working_df.loc[valid_mask].copy()
+        working_df["year"] = year_values.loc[valid_mask].astype(int)
+        working_df["month"] = month_values.loc[valid_mask].astype(int)
+        if selected_species:
+            working_df["seriesName"] = self._gbif_species_values(working_df).reindex(working_df.index).fillna("Unknown")
+        else:
+            working_df["seriesName"] = "ALL"
+
+        monthly_counts = (
+            working_df.groupby(["seriesName", "year", "month"], dropna=False)
+            .size()
+            .reset_index(name="occurrenceCount")
+        )
+        if fill_missing and not working_df.empty:
+            start_year = year_from if year_from is not None else int(working_df["year"].min())
+            end_year = year_to if year_to is not None else int(working_df["year"].max())
+            series_names = sorted(monthly_counts["seriesName"].dropna().unique().tolist()) or ["ALL"]
+            index_rows = [
+                {"seriesName": series_name, "year": year, "month": month}
+                for series_name in series_names
+                for year in range(start_year, end_year + 1)
+                for month in range(month_from, month_to + 1)
+            ]
+            monthly_counts = (
+                pd.DataFrame(index_rows)
+                .merge(monthly_counts, on=["seriesName", "year", "month"], how="left")
+                .fillna({"occurrenceCount": 0})
+            )
+
+        monthly_counts["occurrenceCount"] = monthly_counts["occurrenceCount"].astype(int)
+        monthly_counts["periodGrain"] = "month"
+        monthly_counts["periodLabel"] = (
+            monthly_counts["year"].astype(str) + "-" + monthly_counts["month"].astype(str).str.zfill(2)
+        )
+        monthly_counts["periodDate"] = pd.to_datetime(
+            monthly_counts["periodLabel"] + "-01",
+            errors="coerce",
+        ).dt.strftime("%Y-%m-%d")
+        monthly_counts = self._merge_climate_for_tableau(monthly_counts, climate_df)
+        annual_counts = self._annualize_tableau_timeseries(monthly_counts)
+        return pd.concat([monthly_counts, annual_counts], ignore_index=True).sort_values(
+            ["periodGrain", "seriesName", "year", "month"]
+        )
+
+    def _merge_climate_for_tableau(self, monthly_df: pd.DataFrame, climate_df: pd.DataFrame | None) -> pd.DataFrame:
+        result_df = monthly_df.copy()
+        if climate_df is None or climate_df.empty:
+            result_df["temperatureC"] = ""
+            result_df["precipitationMmPerDay"] = ""
+            result_df["precipitationTotalMm"] = ""
+            result_df["climateSource"] = ""
+            result_df["climateLatitude"] = ""
+            result_df["climateLongitude"] = ""
+            return result_df
+
+        climate_columns = [
+            column
+            for column in ["year", "month", "temperatureC", "precipitationMmPerDay", "precipitationTotalMm"]
+            if column in climate_df.columns
+        ]
+        result_df = result_df.merge(climate_df[climate_columns], on=["year", "month"], how="left")
+        location = self.gbif_climate_location or {}
+        result_df["climateSource"] = location.get("source", "NASA POWER")
+        result_df["climateLatitude"] = location.get("latitude", "")
+        result_df["climateLongitude"] = location.get("longitude", "")
+        return result_df
+
+    @staticmethod
+    def _annualize_tableau_timeseries(monthly_df: pd.DataFrame) -> pd.DataFrame:
+        annual_rows = []
+        for (series_name, year), group in monthly_df.groupby(["seriesName", "year"], dropna=False):
+            annual_rows.append(
+                {
+                    "seriesName": series_name,
+                    "year": int(year),
+                    "month": 0,
+                    "occurrenceCount": int(group["occurrenceCount"].sum()),
+                    "periodGrain": "year",
+                    "periodLabel": str(int(year)),
+                    "periodDate": f"{int(year)}-01-01",
+                    "temperatureC": pd.to_numeric(group.get("temperatureC"), errors="coerce").mean(),
+                    "precipitationMmPerDay": pd.to_numeric(group.get("precipitationMmPerDay"), errors="coerce").mean(),
+                    "precipitationTotalMm": pd.to_numeric(group.get("precipitationTotalMm"), errors="coerce").sum(),
+                    "climateSource": group.get("climateSource", pd.Series([""])).iloc[0],
+                    "climateLatitude": group.get("climateLatitude", pd.Series([""])).iloc[0],
+                    "climateLongitude": group.get("climateLongitude", pd.Series([""])).iloc[0],
+                }
+            )
+        return pd.DataFrame(annual_rows)
 
     def export_gbif_analysis_geojson(self):
         if self.gbif_raw_df is None or self.gbif_raw_df.empty:
@@ -1319,6 +2134,9 @@ class GbifAnalysisTab(QWidget):
         year_to: int | None = None,
         month_from: int = 1,
         month_to: int = 12,
+        compare_species: list[str] | None = None,
+        fill_missing_periods: bool = True,
+        cumulative: bool = False,
     ) -> str:
         df = GbifAnalysisTab._filter_gbif_dataframe(
             df,
@@ -1353,6 +2171,9 @@ class GbifAnalysisTab(QWidget):
             year_to,
             month_from,
             month_to,
+            compare_species,
+            fill_missing_periods,
+            cumulative,
         )
 
         points_json = json.dumps(points, ensure_ascii=False)
@@ -1520,6 +2341,7 @@ class GbifAnalysisTab(QWidget):
       일치 이름: <b>${{escapeHtml(summary.matchedName || "")}}</b> /
       taxonKey: ${{escapeHtml(summary.taxonKey || "")}} /
       국가: ${{escapeHtml(summary.countryCode || "ALL")}} /
+      대륙: ${{escapeHtml(summary.continent || "ALL")}} /
       전체 좌표 기록: ${{Number(summary.totalRecords || 0).toLocaleString()}}건 /
       표시: ${{Number(summary.shownRecords || 0).toLocaleString()}}건
     `;
@@ -1668,45 +2490,139 @@ class GbifAnalysisTab(QWidget):
         year_to: int | None = None,
         month_from: int = 1,
         month_to: int = 12,
+        compare_species: list[str] | None = None,
+        fill_missing_periods: bool = True,
+        cumulative: bool = False,
     ) -> list[dict]:
-        if period_type == "summary":
+        if compare_species and len(compare_species) > 1 and period_type in {"year", "month", "season"}:
             return [
-                GbifAnalysisTab._gbif_temporal_chart_data(
-                    df,
-                    "year",
-                    year_from,
-                    year_to,
-                    month_from,
-                    month_to,
-                ),
-                GbifAnalysisTab._gbif_temporal_chart_data(
-                    df,
-                    "month",
-                    year_from,
-                    year_to,
-                    month_from,
-                    month_to,
-                ),
-                GbifAnalysisTab._gbif_temporal_chart_data(
-                    df,
-                    "season",
-                    year_from,
-                    year_to,
-                    month_from,
-                    month_to,
-                ),
+                GbifAnalysisTab._apply_gbif_chart_series_options(
+                    GbifAnalysisTab._gbif_species_period_chart_data(
+                        df,
+                        period_type,
+                        compare_species,
+                        year_from,
+                        year_to,
+                        month_from,
+                        month_to,
+                        fill_missing_periods,
+                    ),
+                    cumulative,
+                )
             ]
 
-        return [
-            GbifAnalysisTab._gbif_temporal_chart_data(
-                df,
-                period_type,
-                year_from,
-                year_to,
-                month_from,
-                month_to,
+        def chart_for(chart_period_type: str) -> dict:
+            return GbifAnalysisTab._apply_gbif_chart_series_options(
+                GbifAnalysisTab._gbif_temporal_chart_data(
+                    df,
+                    chart_period_type,
+                    year_from,
+                    year_to,
+                    month_from,
+                    month_to,
+                    fill_missing_periods,
+                ),
+                cumulative,
             )
-        ]
+
+        if period_type == "summary":
+            return [
+                chart_for("year"),
+                chart_for("month"),
+                chart_for("season"),
+            ]
+
+        return [chart_for(period_type)]
+
+    @staticmethod
+    def _gbif_species_period_chart_data(
+        df: pd.DataFrame,
+        period_type: str,
+        species_names: list[str],
+        year_from: int | None = None,
+        year_to: int | None = None,
+        month_from: int = 1,
+        month_to: int = 12,
+        fill_missing_periods: bool = True,
+    ) -> dict:
+        species_values = GbifAnalysisTab._gbif_species_values(df).reindex(df.index)
+        selected_species = [name for name in species_names if name in set(species_values.dropna())]
+        if not selected_species:
+            selected_species = species_names
+
+        if period_type == "month":
+            labels = [f"{month}월" for month in range(month_from, month_to + 1)]
+            keys = list(range(month_from, month_to + 1))
+
+            def values_for_species(species_df: pd.DataFrame) -> list[int]:
+                month_values = GbifAnalysisTab._gbif_month_values(species_df)
+                return [int((month_values == key).sum()) for key in keys]
+
+            title = "월별 종 비교"
+        elif period_type == "season":
+            season_defs = [
+                ("봄", {3, 4, 5}),
+                ("여름", {6, 7, 8}),
+                ("가을", {9, 10, 11}),
+                ("겨울", {12, 1, 2}),
+            ]
+            season_defs = [
+                (label, {month for month in months if month_from <= month <= month_to})
+                for label, months in season_defs
+            ]
+            season_defs = [(label, months) for label, months in season_defs if months]
+            labels = [label for label, _ in season_defs]
+
+            def values_for_species(species_df: pd.DataFrame) -> list[int]:
+                month_values = GbifAnalysisTab._gbif_month_values(species_df)
+                return [int(month_values[month_values.isin(months)].count()) for _, months in season_defs]
+
+            title = "계절별 종 비교"
+        else:
+            year_values = GbifAnalysisTab._gbif_year_values(df)
+            if fill_missing_periods and not year_values.empty:
+                start_year = year_from if year_from is not None else int(year_values.min())
+                end_year = year_to if year_to is not None else int(year_values.max())
+                years = list(range(start_year, end_year + 1))
+            else:
+                years = sorted(year_values.unique())
+            if year_from is not None:
+                years = [year for year in years if year >= year_from]
+            if year_to is not None:
+                years = [year for year in years if year <= year_to]
+            labels = [str(year) for year in years]
+
+            def values_for_species(species_df: pd.DataFrame) -> list[int]:
+                species_years = GbifAnalysisTab._gbif_year_values(species_df)
+                return [int((species_years == year).sum()) for year in years]
+
+            title = "연도별 종 비교"
+
+        series = []
+        for species_name in selected_species:
+            species_df = df.loc[species_values.eq(species_name).fillna(False)]
+            series.append(
+                {
+                    "name": species_name[:70],
+                    "values": values_for_species(species_df),
+                }
+            )
+        return {"title": title, "labels": labels, "series": series}
+
+    @staticmethod
+    def _apply_gbif_chart_series_options(chart: dict, cumulative: bool = False) -> dict:
+        if not cumulative:
+            return chart
+        updated_series = []
+        for series in chart.get("series", []):
+            running_total = 0
+            values = []
+            for value in series.get("values", []):
+                running_total += int(value or 0)
+                values.append(running_total)
+            updated_series.append({**series, "values": values})
+        title = str(chart.get("title", ""))
+        return {**chart, "title": f"{title} 누적", "series": updated_series}
 
     @staticmethod
     def _gbif_temporal_chart_data(
@@ -1716,6 +2632,7 @@ class GbifAnalysisTab(QWidget):
         year_to: int | None = None,
         month_from: int = 1,
         month_to: int = 12,
+        fill_missing_periods: bool = True,
     ) -> dict:
         if period_type == "species":
             return GbifAnalysisTab._gbif_categorical_chart_data(
@@ -1762,6 +2679,7 @@ class GbifAnalysisTab(QWidget):
                 year_to,
                 month_keys,
                 lambda month_values, key: int((month_values == key).sum()),
+                fill_missing_periods,
             )
             return {
                 "title": "월별",
@@ -1787,6 +2705,7 @@ class GbifAnalysisTab(QWidget):
                 year_to,
                 [months for _, months in season_defs],
                 lambda month_values, months: int(month_values[month_values.isin(months)].count()),
+                fill_missing_periods,
             )
             return {
                 "title": "계절별",
@@ -1796,6 +2715,11 @@ class GbifAnalysisTab(QWidget):
 
         years = pd.to_numeric(df.get("year"), errors="coerce").dropna().astype(int)
         year_counts = years.value_counts().sort_index()
+        if fill_missing_periods and not years.empty:
+            start_year = year_from if year_from is not None else int(years.min())
+            end_year = year_to if year_to is not None else int(years.max())
+            full_years = list(range(start_year, end_year + 1))
+            year_counts = year_counts.reindex(full_years, fill_value=0)
         return {
             "title": "연도별",
             "labels": [str(year) for year in year_counts.index],
@@ -1855,9 +2779,15 @@ class GbifAnalysisTab(QWidget):
         year_to: int | None,
         keys: list,
         count_for_key,
+        fill_missing_periods: bool = True,
     ) -> list[dict]:
         year_values = GbifAnalysisTab._gbif_year_values(df)
-        candidate_years = sorted(year_values.unique())
+        if fill_missing_periods and not year_values.empty:
+            start_year = year_from if year_from is not None else int(year_values.min())
+            end_year = year_to if year_to is not None else int(year_values.max())
+            candidate_years = list(range(start_year, end_year + 1))
+        else:
+            candidate_years = sorted(year_values.unique())
         if year_from is not None:
             candidate_years = [year for year in candidate_years if year >= year_from]
         if year_to is not None:
@@ -1891,6 +2821,8 @@ class GbifAnalysisTab(QWidget):
         year_to: int | None,
         month_from: int,
         month_to: int,
+        country_codes: list[str] | None = None,
+        continent_codes: list[str] | None = None,
     ) -> pd.DataFrame:
         filtered_df = df.copy()
         if filtered_df.empty:
@@ -1910,7 +2842,30 @@ class GbifAnalysisTab(QWidget):
             mask = month_values.ge(month_from).fillna(False) & month_values.le(month_to).fillna(False)
             filtered_df = filtered_df.loc[mask]
 
+        if country_codes and "countryCode" in filtered_df.columns:
+            country_values = filtered_df["countryCode"].fillna("").astype(str).str.upper()
+            allowed_countries = {code.upper() for code in country_codes}
+            filtered_df = filtered_df.loc[country_values.isin(allowed_countries)]
+
+        if continent_codes and "continent" in filtered_df.columns:
+            continent_values = filtered_df["continent"].fillna("").astype(str).str.upper()
+            allowed_continents = {code.upper() for code in continent_codes}
+            filtered_df = filtered_df.loc[continent_values.isin(allowed_continents)]
+
         return filtered_df
+
+    @staticmethod
+    def _gbif_species_values(df: pd.DataFrame) -> pd.Series:
+        if df.empty:
+            return pd.Series(dtype="object")
+        if "scientificName" in df.columns:
+            values = df["scientificName"].fillna("").astype(str).str.strip()
+        else:
+            values = pd.Series("", index=df.index, dtype="object")
+        if "acceptedScientificName" in df.columns:
+            accepted_values = df["acceptedScientificName"].fillna("").astype(str).str.strip()
+            values = values.mask(values == "", accepted_values)
+        return values.replace("", pd.NA).dropna()
 
     @staticmethod
     def _gbif_year_values(df: pd.DataFrame) -> pd.Series:

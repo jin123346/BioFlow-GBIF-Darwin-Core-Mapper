@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from base64 import b64encode
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from datetime import datetime, timezone
@@ -49,6 +49,8 @@ class GbifOccurrenceCriteria:
     taxon_key: int | None = None
     dataset_key: str = ""
     country_code: str = ""
+    country_codes: list[str] = field(default_factory=list)
+    continent_codes: list[str] = field(default_factory=list)
     geometry: str = ""
     basis_of_record: str = ""
     limit: int = 100000
@@ -59,6 +61,22 @@ class GbifOccurrenceCriteria:
 
 
 class GbifService:
+    @staticmethod
+    def _normalized_code_list(*values) -> list[str]:
+        codes = []
+        for value in values:
+            if value is None:
+                continue
+            if isinstance(value, str):
+                candidates = value.split(",")
+            else:
+                candidates = value
+            for candidate in candidates:
+                code = str(candidate).strip().upper()
+                if code and code not in codes:
+                    codes.append(code)
+        return codes
+
     @staticmethod
     def _cache_key(params: dict) -> str:
         normalized = json.dumps(params, ensure_ascii=False, sort_keys=True)
@@ -192,7 +210,8 @@ class GbifService:
         max_workers: int = 4,
     ) -> GbifSearchResult:
         scientific_name = criteria.scientific_name.strip()
-        country_code = criteria.country_code.strip().upper()
+        country_codes = cls._normalized_code_list(criteria.country_codes, criteria.country_code)
+        continent_codes = cls._normalized_code_list(criteria.continent_codes)
         basis_of_record = criteria.basis_of_record.strip().upper()
         dataset_key = criteria.dataset_key.strip()
         geometry = criteria.geometry.strip()
@@ -202,7 +221,8 @@ class GbifService:
             "scientificName": scientific_name,
             "taxonKey": taxon_key,
             "datasetKey": dataset_key,
-            "countryCode": country_code,
+            "countryCode": country_codes,
+            "continent": continent_codes,
             "geometry": geometry,
             "basisOfRecord": basis_of_record,
             "limit": requested_limit,
@@ -240,7 +260,7 @@ class GbifService:
                 "usageKey": taxon_key,
             }
 
-        if taxon_key is None and not dataset_key and not country_code and not geometry:
+        if taxon_key is None and not dataset_key and not country_codes and not continent_codes and not geometry:
             raise ValueError("학명/taxonKey, datasetKey, 국가코드, geometry 중 하나 이상을 입력하세요.")
 
         page_size = min(300, requested_limit)
@@ -256,8 +276,10 @@ class GbifService:
             base_params["taxon_key"] = taxon_key
         if dataset_key:
             base_params["dataset_key"] = dataset_key
-        if country_code:
-            base_params["country"] = country_code
+        if country_codes:
+            base_params["country"] = country_codes
+        if continent_codes:
+            base_params["continent"] = continent_codes
         if geometry:
             base_params["geometry"] = geometry
         if basis_of_record:
@@ -354,6 +376,8 @@ class GbifService:
         cls,
         scientific_name: str = "",
         country_code: str = "",
+        country_codes: list[str] | None = None,
+        continent_codes: list[str] | None = None,
         username: str = "",
         password: str = "",
         email: str = "",
@@ -378,7 +402,15 @@ class GbifService:
             taxon_key = match.get("usageKey")
             if not taxon_key:
                 raise RuntimeError("GBIF에서 일치하는 taxonKey를 찾지 못했습니다.")
-        if taxon_key is None and not dataset_key.strip() and not country_code.strip() and not geometry.strip():
+        normalized_country_codes = cls._normalized_code_list(country_codes or [], country_code)
+        normalized_continent_codes = cls._normalized_code_list(continent_codes or [])
+        if (
+            taxon_key is None
+            and not dataset_key.strip()
+            and not normalized_country_codes
+            and not normalized_continent_codes
+            and not geometry.strip()
+        ):
             raise ValueError("학명/taxonKey, datasetKey, 국가코드, geometry 중 하나 이상을 입력하세요.")
 
         predicates = [
@@ -404,14 +436,8 @@ class GbifService:
                     "value": dataset_key.strip(),
                 }
             )
-        if country_code.strip():
-            predicates.append(
-                {
-                    "type": "equals",
-                    "key": "COUNTRY",
-                    "value": country_code.strip().upper(),
-                }
-            )
+        cls._append_download_code_predicate(predicates, "COUNTRY", normalized_country_codes)
+        cls._append_download_code_predicate(predicates, "CONTINENT", normalized_continent_codes)
         if geometry.strip():
             predicates.append(
                 {
@@ -485,6 +511,33 @@ class GbifService:
             status_url=f"{GBIF_API_BASE}/occurrence/download/{key}",
             download_url=f"https://www.gbif.org/occurrence/download/{key}",
             citation_url="",
+        )
+
+    @staticmethod
+    def _append_download_code_predicate(predicates: list[dict], key: str, values: list[str]) -> None:
+        if not values:
+            return
+        if len(values) == 1:
+            predicates.append(
+                {
+                    "type": "equals",
+                    "key": key,
+                    "value": values[0],
+                }
+            )
+            return
+        predicates.append(
+            {
+                "type": "or",
+                "predicates": [
+                    {
+                        "type": "equals",
+                        "key": key,
+                        "value": value,
+                    }
+                    for value in values
+                ],
+            }
         )
 
     @staticmethod
